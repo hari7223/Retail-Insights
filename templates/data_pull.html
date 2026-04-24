@@ -1,0 +1,219 @@
+<!-- DATA_PULL.HTML -->
+<!-- Save as templates/data_pull.html -->
+
+{% extends "base.html" %}
+{% block content %}
+<style>
+  /* Column group colors — Kroger palette */
+  .g-transaction { background: var(--kroger-navy);  color: rgba(255,255,255,0.8); }
+  .g-product     { background: #065f46;              color: rgba(255,255,255,0.8); }
+  .g-spend       { background: var(--kroger-red);    color: rgba(255,255,255,0.8); }
+  .g-location    { background: #4c1d95;              color: rgba(255,255,255,0.8); }
+  .g-household   { background: #0f4c75;              color: rgba(255,255,255,0.8); }
+
+  .c-transaction { background: #1d4ed8; color: #eff6ff; }
+  .c-product     { background: #047857; color: #ecfdf5; }
+  .c-spend       { background: var(--kroger-red); color: #fff7ed; }
+  .c-location    { background: #5b21b6; color: #f5f3ff; }
+  .c-household   { background: #0f4c75; color: #f0f9ff; }
+
+  .dp-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.75rem; }
+  .dp-table thead tr.group-row th {
+    padding: 5px 10px;
+    text-align: center;
+    font-family: var(--font-head);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    border-right: 2px solid rgba(255,255,255,0.2);
+  }
+  .dp-table thead tr.col-row th {
+    padding: 7px 10px;
+    text-align: left;
+    font-size: 0.7rem;
+    font-weight: 500;
+    white-space: nowrap;
+    border-right: 1px solid rgba(255,255,255,0.12);
+  }
+  .sort-btn {
+    background: none; border: none; color: inherit;
+    cursor: pointer; padding: 0;
+    font-family: var(--font-mono); font-size: 0.7rem; font-weight: 500;
+    white-space: nowrap; display: flex; align-items: center; gap: 4px;
+  }
+  .dp-table tbody tr { border-bottom: 1px solid #f1f5f9; transition: background 0.1s; }
+  .dp-table tbody tr:hover { background: #f8fafc; }
+  .dp-table tbody td {
+    padding: 6px 10px;
+    white-space: nowrap;
+    border-right: 1px solid #f1f5f9;
+    color: var(--kroger-text);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+  }
+  .td-transaction { color: #1d4ed8; }
+  .td-product     { color: #047857; }
+  .td-spend       { color: var(--kroger-red); font-weight: 500; }
+  .td-location    { color: #5b21b6; }
+  .td-household   { color: #0f4c75; }
+
+  .search-bar {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    background: #fff; border: 1px solid var(--kroger-border);
+    border-radius: var(--radius); padding: 12px 16px; margin-bottom: 16px;
+    box-shadow: var(--shadow);
+  }
+  .search-bar input[type=number] {
+    border: 1.5px solid var(--kroger-border); border-radius: 7px;
+    padding: 7px 12px; font-family: var(--font-mono); font-size: 0.83rem;
+    width: 180px; outline: none; color: var(--kroger-text);
+  }
+  .search-bar input[type=number]:focus {
+    border-color: var(--kroger-red);
+    box-shadow: 0 0 0 3px rgba(227,24,55,0.08);
+  }
+  .page-btn {
+    background: #fff; border: 1.5px solid var(--kroger-border);
+    border-radius: 7px; padding: 5px 14px; font-size: 0.78rem;
+    cursor: pointer; color: var(--kroger-text); font-family: var(--font-body);
+    transition: all 0.15s;
+  }
+  .page-btn:hover { border-color: var(--kroger-red); color: var(--kroger-red); }
+</style>
+
+<div class="k-page-title">Household Data Pull</div>
+<div class="k-page-sub">Search by household number or browse all records</div>
+
+<div class="search-bar">
+  <form method="POST" style="display:flex; gap:10px; align-items:center">
+    <input type="number" name="hshd_num"
+           value="{{ hshd_num if show_all != 'true' else '' }}"
+           placeholder="HSHD_NUM (e.g. 10)">
+    <input type="hidden" name="show_all" value="false">
+    <input type="hidden" name="page" value="1">
+    <button type="submit" class="k-btn">Search</button>
+  </form>
+  <form method="POST">
+    <input type="hidden" name="show_all" value="true">
+    <input type="hidden" name="page" value="1">
+    <button type="submit" class="k-btn outline-red">Show All</button>
+  </form>
+  {% if rows %}
+  <span style="margin-left:auto; font-family:var(--font-mono); font-size:0.75rem; color:var(--kroger-muted)">
+    {% if show_all == 'true' %}All households{% else %}HSHD {{ hshd_num }}{% endif %}
+    &nbsp;·&nbsp; {{ rows|length }} of {{ total }} rows &nbsp;·&nbsp; page {{ page }}/{{ total_pages }}
+  </span>
+  {% endif %}
+</div>
+
+{% if rows %}
+<div style="background:#fff; border-radius:var(--radius); box-shadow:var(--shadow);
+            border:1px solid var(--kroger-border); overflow:hidden">
+  <div style="overflow-x:auto">
+    <table class="dp-table">
+      <thead>
+        <tr class="group-row">
+          <th colspan="4" class="g-transaction">Transaction</th>
+          <th colspan="2" class="g-product">Product</th>
+          <th colspan="2" class="g-spend">Spend</th>
+          <th colspan="3" class="g-location">Location & Time</th>
+          <th colspan="8" class="g-household">Household Demographics</th>
+        </tr>
+        <tr class="col-row">
+          {% set col_classes = {
+            "HSHD_NUM": "c-transaction", "BASKET_NUM": "c-transaction",
+            "PURCHASE_DATE": "c-transaction", "PRODUCT_NUM": "c-transaction",
+            "DEPARTMENT": "c-product", "COMMODITY": "c-product",
+            "SPEND": "c-spend", "UNITS": "c-spend",
+            "STORE_R": "c-location", "WEEK_NUM": "c-location", "YEAR": "c-location",
+            "L": "c-household", "AGE_RANGE": "c-household", "MARITAL": "c-household",
+            "INCOME_RANGE": "c-household", "HOMEOWNER": "c-household",
+            "HSHD_COMPOSITION": "c-household", "HH_SIZE": "c-household", "CHILDREN": "c-household"
+          } %}
+          {% set sortable = ["HSHD_NUM","BASKET_NUM","PURCHASE_DATE","PRODUCT_NUM",
+                             "DEPARTMENT","COMMODITY","SPEND","UNITS"] %}
+          {% for col in columns %}
+          <th class="{{ col_classes.get(col, 'c-household') }}">
+            {% if col in sortable %}
+              <form method="POST" style="display:inline">
+                <input type="hidden" name="hshd_num" value="{{ hshd_num }}">
+                <input type="hidden" name="show_all" value="{{ show_all }}">
+                <input type="hidden" name="page" value="1">
+                <input type="hidden" name="sort" value="{{ col }}">
+                <input type="hidden" name="sort_dir" value="{{ next_dir if sort_col == col else 'asc' }}">
+                <button type="submit" class="sort-btn">
+                  {{ col }}
+                  <span style="opacity:0.6; font-size:0.62rem">
+                    {% if sort_col == col %}{{ '▲' if sort_dir == 'asc' else '▼' }}{% else %}⇅{% endif %}
+                  </span>
+                </button>
+              </form>
+            {% else %}
+              {{ col }}
+            {% endif %}
+          </th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% set td_classes = {
+          "HSHD_NUM": "td-transaction", "BASKET_NUM": "td-transaction",
+          "PURCHASE_DATE": "td-transaction", "PRODUCT_NUM": "td-transaction",
+          "DEPARTMENT": "td-product", "COMMODITY": "td-product",
+          "SPEND": "td-spend", "UNITS": "td-spend",
+          "STORE_R": "td-location", "WEEK_NUM": "td-location", "YEAR": "td-location",
+          "L": "td-household", "AGE_RANGE": "td-household", "MARITAL": "td-household",
+          "INCOME_RANGE": "td-household", "HOMEOWNER": "td-household",
+          "HSHD_COMPOSITION": "td-household", "HH_SIZE": "td-household", "CHILDREN": "td-household"
+        } %}
+        {% for row in rows %}
+        <tr>
+          {% for col in columns %}
+          <td class="{{ td_classes.get(col, '') }}">{{ row[col] }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if total_pages > 1 %}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px">
+  <span style="font-family:var(--font-mono); font-size:0.75rem; color:var(--kroger-muted)">
+    Page {{ page }} of {{ total_pages }} &nbsp;·&nbsp; {{ total }} total rows
+  </span>
+  <div style="display:flex; gap:8px">
+    {% if page > 1 %}
+    <form method="POST">
+      <input type="hidden" name="hshd_num" value="{{ hshd_num }}">
+      <input type="hidden" name="show_all" value="{{ show_all }}">
+      <input type="hidden" name="sort" value="{{ sort_col }}">
+      <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
+      <input type="hidden" name="page" value="{{ page - 1 }}">
+      <button type="submit" class="page-btn">← Prev</button>
+    </form>
+    {% endif %}
+    {% if page < total_pages %}
+    <form method="POST">
+      <input type="hidden" name="hshd_num" value="{{ hshd_num }}">
+      <input type="hidden" name="show_all" value="{{ show_all }}">
+      <input type="hidden" name="sort" value="{{ sort_col }}">
+      <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
+      <input type="hidden" name="page" value="{{ page + 1 }}">
+      <button type="submit" class="page-btn">Next →</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% else %}
+<div style="background:#fff; border:1px solid var(--kroger-border); border-radius:var(--radius);
+            padding:32px; text-align:center; color:var(--kroger-muted);
+            font-family:var(--font-mono); font-size:0.82rem; box-shadow:var(--shadow)">
+  No data found for HSHD_NUM {{ hshd_num }}.
+</div>
+{% endif %}
+{% endblock %}

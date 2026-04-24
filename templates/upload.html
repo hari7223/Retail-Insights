@@ -1,0 +1,40 @@
+<!-- UPLOAD.HTML -->
+<!-- Save as templates/upload.html -->
+
+{% extends "base.html" %}
+{% block content %}
+<div class="k-page-title">Upload Dataset</div>
+<div class="k-page-sub">Upload all three files to reload the data. All tables will be refreshed.</div>
+
+<div class="row justify-content-center">
+  <div class="col-md-6">
+    <div class="k-card">
+      <div class="k-card-title">CSV Files</div>
+      <form method="POST" enctype="multipart/form-data">
+        <div style="margin-bottom:16px">
+          <label class="k-label">Households CSV</label>
+          <input type="file" name="households" class="k-input" accept=".csv" required
+                 style="padding:6px 12px; cursor:pointer">
+        </div>
+        <div style="margin-bottom:16px">
+          <label class="k-label">Transactions CSV</label>
+          <input type="file" name="transactions" class="k-input" accept=".csv" required
+                 style="padding:6px 12px; cursor:pointer">
+        </div>
+        <div style="margin-bottom:20px">
+          <label class="k-label">Products CSV</label>
+          <input type="file" name="products" class="k-input" accept=".csv" required
+                 style="padding:6px 12px; cursor:pointer">
+        </div>
+        <button type="submit" class="k-btn red" style="width:100%">Upload & Reload Data</button>
+      </form>
+
+      <div style="margin-top:16px; padding:12px 14px; background:var(--kroger-light);
+                  border-radius:8px; font-size:0.78rem; color:var(--kroger-muted);
+                  font-family:var(--font-mono);">
+        ⚠ All three files are required. Uploading will delete and replace existing data.
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

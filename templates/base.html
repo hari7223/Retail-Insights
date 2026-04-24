@@ -1,0 +1,272 @@
+<!-- BASE.HTML -->
+<!-- Save as templates/base.html -->
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Retail Intelligence — Kroger</title>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root {
+      --kroger-red:    #E31837;
+      --kroger-navy:   #1A2744;
+      --kroger-dark:   #0f1a30;
+      --kroger-light:  #f4f6fb;
+      --kroger-border: #dde3f0;
+      --kroger-text:   #1e2d4d;
+      --kroger-muted:  #64748b;
+      --font-head:     'Syne', sans-serif;
+      --font-body:     'DM Sans', sans-serif;
+      --font-mono:     'DM Mono', monospace;
+      --radius:        10px;
+      --shadow:        0 2px 12px rgba(26,39,68,0.08);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      background: var(--kroger-light);
+      font-family: var(--font-body);
+      color: var(--kroger-text);
+      font-size: 0.9rem;
+    }
+
+    /* ── Navbar ── */
+    .k-nav {
+      background: var(--kroger-navy);
+      padding: 0 28px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+    .k-nav-brand {
+      font-family: var(--font-head);
+      font-weight: 800;
+      font-size: 1.1rem;
+      color: #fff;
+      letter-spacing: -0.3px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .k-nav-brand .dot {
+      width: 8px; height: 8px;
+      background: var(--kroger-red);
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .k-nav-links { display: flex; gap: 4px; align-items: center; }
+    .k-nav-link {
+      color: rgba(255,255,255,0.7);
+      text-decoration: none;
+      font-family: var(--font-body);
+      font-size: 0.82rem;
+      font-weight: 500;
+      padding: 6px 12px;
+      border-radius: 6px;
+      transition: all 0.15s;
+    }
+    .k-nav-link:hover { color: #fff; background: rgba(255,255,255,0.1); }
+    .k-nav-link.active { color: #fff; background: rgba(227,24,55,0.25); }
+    .k-nav-link.danger { color: #fca5a5; }
+    .k-nav-link.danger:hover { background: rgba(227,24,55,0.2); color: #fff; }
+
+    /* ── Page wrapper ── */
+    .k-page { padding: 28px 32px; max-width: 1400px; margin: 0 auto; }
+
+    /* ── Page header ── */
+    .k-page-title {
+      font-family: var(--font-head);
+      font-size: 1.35rem;
+      font-weight: 700;
+      color: var(--kroger-navy);
+      margin-bottom: 6px;
+      letter-spacing: -0.3px;
+    }
+    .k-page-sub {
+      font-size: 0.8rem;
+      color: var(--kroger-muted);
+      margin-bottom: 20px;
+      font-family: var(--font-mono);
+    }
+
+    /* ── Cards ── */
+    .k-card {
+      background: #fff;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      border: 1px solid var(--kroger-border);
+      padding: 20px;
+    }
+    .k-card-title {
+      font-family: var(--font-head);
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: var(--kroger-navy);
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .k-card-title::before {
+      content: '';
+      width: 3px; height: 14px;
+      background: var(--kroger-red);
+      border-radius: 2px;
+      display: inline-block;
+    }
+
+    /* ── KPI Cards ── */
+    .k-kpi {
+      background: var(--kroger-navy);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .k-kpi.red { background: var(--kroger-red); }
+    .k-kpi.dark { background: var(--kroger-dark); }
+    .k-kpi.teal { background: #0f4c75; }
+    .k-kpi-label { font-size: 0.72rem; opacity: 0.75; font-family: var(--font-mono); margin-bottom: 6px; }
+    .k-kpi-value { font-family: var(--font-head); font-size: 1.6rem; font-weight: 700; line-height: 1; }
+
+    /* ── Buttons ── */
+    .k-btn {
+      background: var(--kroger-navy);
+      color: #fff;
+      border: none;
+      border-radius: 7px;
+      padding: 8px 20px;
+      font-family: var(--font-head);
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .k-btn:hover { background: #243660; }
+    .k-btn.red { background: var(--kroger-red); }
+    .k-btn.red:hover { background: #c41230; }
+    .k-btn.ghost {
+      background: transparent;
+      color: var(--kroger-navy);
+      border: 1.5px solid var(--kroger-border);
+    }
+    .k-btn.ghost:hover { border-color: var(--kroger-navy); }
+    .k-btn.outline-red {
+      background: transparent;
+      color: var(--kroger-red);
+      border: 1.5px solid var(--kroger-red);
+    }
+    .k-btn.outline-red:hover { background: var(--kroger-red); color: #fff; }
+
+    /* ── Form inputs ── */
+    .k-input {
+      border: 1.5px solid var(--kroger-border);
+      border-radius: 7px;
+      padding: 8px 12px;
+      font-family: var(--font-mono);
+      font-size: 0.83rem;
+      outline: none;
+      width: 100%;
+      background: #fff;
+      color: var(--kroger-text);
+      transition: border-color 0.15s;
+    }
+    .k-input:focus { border-color: var(--kroger-red); box-shadow: 0 0 0 3px rgba(227,24,55,0.08); }
+    .k-label {
+      font-size: 0.78rem;
+      font-weight: 500;
+      color: var(--kroger-muted);
+      margin-bottom: 5px;
+      display: block;
+      font-family: var(--font-body);
+    }
+
+    /* ── Alerts ── */
+    .k-alert {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #991b1b;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.82rem;
+      margin-bottom: 14px;
+    }
+    .k-alert.info {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+      color: #1e40af;
+    }
+    .k-alert.success {
+      background: #f0fdf4;
+      border-color: #bbf7d0;
+      color: #166534;
+    }
+
+    /* ── Tables ── */
+    .k-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 0.76rem; }
+    .k-table thead th {
+      background: var(--kroger-navy);
+      color: rgba(255,255,255,0.85);
+      padding: 9px 12px;
+      text-align: left;
+      font-weight: 500;
+      white-space: nowrap;
+      border-right: 1px solid rgba(255,255,255,0.08);
+    }
+    .k-table tbody tr { border-bottom: 1px solid #f1f5f9; }
+    .k-table tbody tr:hover { background: #f8fafc; }
+    .k-table tbody td { padding: 7px 12px; color: var(--kroger-text); white-space: nowrap; }
+
+    /* ── Badge ── */
+    .k-badge {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 20px;
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      font-weight: 500;
+    }
+    .k-badge.red { background: #fee2e2; color: #991b1b; }
+    .k-badge.yellow { background: #fef9c3; color: #854d0e; }
+    .k-badge.green { background: #dcfce7; color: #166534; }
+  </style>
+</head>
+<body>
+
+<nav class="k-nav">
+  <div class="k-nav-brand">
+    Retail Intelligence
+  </div>
+  {% if session.user %}
+  <div class="k-nav-links">
+    <a href="/dashboard" class="k-nav-link {% if request.path == '/dashboard' %}active{% endif %}">Dashboard</a>
+    <a href="/ml" class="k-nav-link {% if request.path == '/ml' %}active{% endif %}">ML Models</a>
+    <a href="/data-pull" class="k-nav-link {% if request.path == '/data-pull' %}active{% endif %}">Data Pull</a>
+    <a href="/upload" class="k-nav-link {% if request.path == '/upload' %}active{% endif %}">Upload</a>
+    <a href="/logout" class="k-nav-link danger">Logout</a>
+  </div>
+  {% endif %}
+</nav>
+
+<div class="k-page">
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for m in messages %}
+        <div class="k-alert">{{ m }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

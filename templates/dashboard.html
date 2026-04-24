@@ -1,0 +1,398 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="k-page-title">Dashboard</div>
+<div class="k-page-sub"> Customer Engagement & Lifetime Value Analytics</div>
+
+<!-- KPI Row -->
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="k-kpi">
+      <div class="k-kpi-label">Avg Customer Lifetime Value</div>
+      <div class="k-kpi-value">${{ avg_clv }}</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="k-kpi red">
+      <div class="k-kpi-label">High Churn Risk Households</div>
+      <div class="k-kpi-value">{{ high_risk_count }}</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="k-kpi teal">
+      <div class="k-kpi-label">Top Department</div>
+      <div class="k-kpi-value" style="font-size:1.1rem">{{ dept[0].DEPARTMENT if dept else 'N/A' }}</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="k-kpi dark">
+      <div class="k-kpi-label">Top Commodity</div>
+      <div class="k-kpi-value" style="font-size:1.1rem">{{ commodity[0].COMMODITY if commodity else 'N/A' }}</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Demographics & Engagement ── -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:4px">
+  Demographics & Engagement
+</div>
+<div class="row g-3 mb-3">
+  <div class="col-md-3">
+    <div class="k-card">
+      <div class="k-card-title">Income Range vs Avg Spend</div>
+      <div id="income-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="k-card">
+      <div class="k-card-title">Household Size vs Avg Spend</div>
+      <div id="hhsize-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="k-card">
+      <div class="k-card-title">Children Presence vs Avg Spend</div>
+      <div id="children-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="k-card">
+      <div class="k-card-title">Spend by Store Region</div>
+      <div id="region-chart"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Q2: Engagement Over Time ── -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:16px">
+  Engagement Over Time
+</div>
+<div class="row g-3 mb-3">
+  <div class="col-md-8">
+    <div class="k-card">
+      <div class="k-card-title">Weekly Spend Trend</div>
+      <div id="trend-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Department Spend by Year</div>
+      <div id="dept-year-chart"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Q3: Basket Analysis ── -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:16px">
+  Basket Analysis — Top Co-Purchased Commodity Pairs
+</div>
+<div class="row g-3 mb-3">
+  <div class="col-md-7">
+    <div class="k-card">
+      <div class="k-card-title">Most Frequently Bought Together</div>
+      <div id="basket-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-5">
+    <div class="k-card" style="padding:0; overflow:hidden">
+      <div class="k-card-title" style="padding:16px 20px 0">Cross-Sell Opportunities</div>
+      <div style="overflow-y:auto; max-height:280px">
+        <table class="k-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Item 1</th>
+              <th>Item 2</th>
+              <th>Co-purchases</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in basket %}
+            <tr>
+              <td style="color:var(--kroger-muted)">{{ loop.index }}</td>
+              <td>{{ row.item_1 }}</td>
+              <td>{{ row.item_2 }}</td>
+              <td style="color:var(--kroger-red); font-weight:500">{{ row.times_bought_together }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Q4: Seasonal Trends ── -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:16px">
+  Seasonal Trends
+</div>
+<div class="row g-3 mb-3">
+  <div class="col-md-5">
+    <div class="k-card">
+      <div class="k-card-title">Total Spend by Season</div>
+      <div id="seasonal-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-7">
+    <div class="k-card">
+      <div class="k-card-title">Department Spend by Season</div>
+      <div id="seasonal-dept-chart"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Q5: Brand Preferences ── -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:16px">
+  Brand Preferences
+</div>
+<div class="row g-3 mb-3">
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Private vs National Brand Spend</div>
+      <div id="brand-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Organic vs Non-Organic</div>
+      <div id="organic-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Brand Preference by Income Group</div>
+      <div id="brand-income-chart"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── ML: Re-engagement Queue ── -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:16px">
+  Re-Engagement Priority Queue
+</div>
+<div class="row g-3 mb-3">
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Churn Risk Distribution</div>
+      <div id="churn-chart"></div>
+    </div>
+  </div>
+  <div class="col-md-8">
+    <div class="k-card" style="padding:0; overflow:hidden">
+      <div class="k-card-title" style="padding:16px 20px 0">High CLV + Churn Risk</div>
+      <div style="overflow-x:auto">
+        <table class="k-table">
+          <thead>
+            <tr>
+              <th>HSHD_NUM</th><th>Predicted CLV ($)</th><th>Churn Prob</th>
+              <th>Baskets</th><th>Days Since Purchase</th><th>Risk</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in top_clv %}
+            <tr>
+              <td><a href="/data-pull" style="color:var(--kroger-red); text-decoration:none">{{ r.HSHD_NUM }}</a></td>
+              <td style="font-weight:500">${{ "%.2f"|format(r.clv_score) }}</td>
+              <td>
+                <div style="display:flex; align-items:center; gap:8px">
+                  <div style="width:60px; height:5px; background:#f1f5f9; border-radius:3px; overflow:hidden">
+                    <div style="width:{{ (r.churn_prob * 100)|int }}%; height:100%;
+                      background:{% if r.churn_prob > 0.6 %}#E31837{% elif r.churn_prob > 0.3 %}#d97706{% else %}#16a34a{% endif %};
+                      border-radius:3px;"></div>
+                  </div>
+                  <span style="font-size:0.7rem; color:var(--kroger-muted)">{{ "%.0f"|format(r.churn_prob * 100) }}%</span>
+                </div>
+              </td>
+              <td>{{ r.frequency }}</td>
+              <td>{{ r.recency }} days</td>
+              <td>
+                <span class="k-badge {% if r.risk_segment=='High Risk' %}red{% elif r.risk_segment=='Medium Risk' %}yellow{% else %}green{% endif %}">
+                  {{ r.risk_segment }}
+                </span>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div style="padding:12px 20px">
+        <a href="/ml" class="k-btn ghost" style="font-size:0.78rem; padding:6px 14px">View All Predictions →</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<script>
+const navy = '#1A2744', red = '#E31837', teal = '#0f4c75';
+const font = { family: 'DM Sans, sans-serif', size: 11, color: '#475569' };
+const margin = { t: 10, b: 70, l: 50, r: 10 };
+const layout = (extra={}) => ({
+  margin, font, height: 240,
+  plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+  xaxis: { gridcolor: '#f1f5f9', tickfont: font },
+  yaxis: { gridcolor: '#f1f5f9', tickfont: font },
+  showlegend: false, ...extra
+});
+
+const income    = {{ income | tojson }};
+const hhsize    = {{ hhsize | tojson }};
+const children  = {{ children | tojson }};
+const region    = {{ region | tojson }};
+const weekly    = {{ weekly | tojson }};
+const deptYear  = {{ dept_year | tojson }};
+const basket    = {{ basket | tojson }};
+const seasonal  = {{ seasonal | tojson }};
+const seasDept  = {{ seasonal_commodity | tojson }};
+const brand     = {{ brand | tojson }};
+const organic   = {{ organic | tojson }};
+const brandInc  = {{ brand_income | tojson }};
+const churnCounts = {{ churn_counts | tojson }};
+
+// Q1
+Plotly.newPlot('income-chart', [{
+  x: income.map(d=>d.INCOME_RANGE), y: income.map(d=>d.avg_spend),
+  type:'bar', marker:{color:navy}
+}], layout());
+
+Plotly.newPlot('hhsize-chart', [{
+  x: hhsize.map(d=>d.HH_SIZE), y: hhsize.map(d=>d.avg_spend),
+  type:'bar', marker:{color:teal}
+}], layout());
+
+Plotly.newPlot('children-chart', [{
+  x: children.map(d=>d.children_status), y: children.map(d=>d.avg_spend),
+  type:'bar', marker:{color:red}
+}], layout());
+
+Plotly.newPlot('region-chart', [{
+  x: region.map(d=>d.STORE_R), y: region.map(d=>d.total_spend),
+  type:'bar', marker:{color:'#7c3aed'}
+}], layout());
+
+// Q2
+Plotly.newPlot('trend-chart', [{
+  x: weekly.map(d=>`W${d.WEEK_NUM} ${d.YEAR}`),
+  y: weekly.map(d=>d.spend),
+  type:'scatter', mode:'lines', fill:'tozeroy',
+  line:{color:navy, width:2}, fillcolor:'rgba(26,39,68,0.07)'
+}], layout({margin:{t:10,b:60,l:60,r:10}}));
+
+// Dept by year — grouped bar
+const years = [...new Set(deptYear.map(d=>d.YEAR))].sort();
+const depts = [...new Set(deptYear.map(d=>d.DEPARTMENT))];
+const deptYearTraces = years.map((yr, i) => ({
+  name: String(yr),
+  x: depts,
+  y: depts.map(dep => {
+    const row = deptYear.find(d=>d.YEAR===yr && d.DEPARTMENT===dep);
+    return row ? row.total_spend : 0;
+  }),
+  type:'bar',
+  marker:{color:i===0?navy:red}
+}));
+Plotly.newPlot('dept-year-chart', deptYearTraces, {
+  ...layout({showlegend:true, legend:{font:{size:10}}}),
+  barmode:'group'
+});
+
+// Q3 Basket
+Plotly.newPlot('basket-chart', [{
+  x: basket.map(d=>d.times_bought_together).reverse(),
+  y: basket.map(d=>`${d.item_1} + ${d.item_2}`).reverse(),
+  type:'bar', orientation:'h',
+  marker:{color:red}
+}], {
+  margin:{t:10, b:30, l:200, r:10},
+  font, height:260,
+  plot_bgcolor:'#fff', paper_bgcolor:'#fff',
+  xaxis:{gridcolor:'#f1f5f9', tickfont:font, title:{text:'Co-purchases', font}},
+  yaxis:{tickfont:{...font, size:9}}
+});
+
+// Q4 Seasonal
+const seasonOrder = ['Spring','Summer','Fall','Winter'];
+const seasonColors = [teal, '#16a34a', '#d97706', navy];
+const sortedSeasonal = seasonOrder.map(s => seasonal.find(d=>d.season===s) || {season:s, total_spend:0});
+Plotly.newPlot('seasonal-chart', [{
+  x: sortedSeasonal.map(d=>d.season),
+  y: sortedSeasonal.map(d=>d.total_spend),
+  type:'bar',
+  marker:{color:seasonColors}
+}], layout());
+
+// Seasonal dept heatmap-style grouped bar
+const seasDeptDepts = [...new Set(seasDept.map(d=>d.DEPARTMENT))];
+const seasTraces = seasonOrder.map((s,i) => ({
+  name: s,
+  x: seasDeptDepts,
+  y: seasDeptDepts.map(dep => {
+    const row = seasDept.find(d=>d.season===s && d.DEPARTMENT===dep);
+    return row ? row.total_spend : 0;
+  }),
+  type:'bar',
+  marker:{color:seasonColors[i]}
+}));
+Plotly.newPlot('seasonal-dept-chart', seasTraces, {
+  ...layout({showlegend:true, legend:{font:{size:10}}}),
+  barmode:'group'
+});
+
+// Q5 Brand
+Plotly.newPlot('brand-chart', [{
+  labels: brand.map(d=>d.BRAND_TY),
+  values: brand.map(d=>d.total_spend),
+  type:'pie', hole:0.5,
+  marker:{colors:[navy, red]}, textfont:font
+}], {margin:{t:10,b:10,l:10,r:10}, font, height:240, paper_bgcolor:'#fff',
+    showlegend:true, legend:{font:{size:10}}});
+
+Plotly.newPlot('organic-chart', [{
+  labels: organic.map(d=>d.NATURAL_ORGANIC_FLAG==='Y'?'Organic':'Non-Organic'),
+  values: organic.map(d=>d.total_spend),
+  type:'pie', hole:0.5,
+  marker:{colors:['#16a34a','#94a3b8']}, textfont:font
+}], {margin:{t:10,b:10,l:10,r:10}, font, height:240, paper_bgcolor:'#fff',
+    showlegend:true, legend:{font:{size:10}}});
+
+// Brand by income — grouped bar
+const incomeGroups = [...new Set(brandInc.map(d=>d.INCOME_RANGE))];
+const brandTypes = [...new Set(brandInc.map(d=>d.BRAND_TY))];
+const brandIncTraces = brandTypes.map((b,i) => ({
+  name: b,
+  x: incomeGroups,
+  y: incomeGroups.map(inc => {
+    const row = brandInc.find(d=>d.INCOME_RANGE===inc && d.BRAND_TY===b);
+    return row ? row.total_spend : 0;
+  }),
+  type:'bar',
+  marker:{color:i===0?navy:red}
+}));
+Plotly.newPlot('brand-income-chart', brandIncTraces, {
+  ...layout({showlegend:true, legend:{font:{size:10}}}),
+  barmode:'group'
+});
+
+// ML Churn
+Plotly.newPlot('churn-chart', [{
+  labels: Object.keys(churnCounts),
+  values: Object.values(churnCounts),
+  type:'pie', hole:0.5,
+  marker:{colors:['#16a34a','#d97706','#E31837']}, textfont:font
+}], {margin:{t:10,b:10,l:10,r:10}, font, height:240, paper_bgcolor:'#fff',
+    showlegend:true, legend:{font:{size:10}}});
+</script>
+
+{% endblock %}

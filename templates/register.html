@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .auth-wrap {
+    min-height: calc(100vh - 120px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .auth-card {
+    background: #fff;
+    border-radius: 14px;
+    box-shadow: 0 4px 24px rgba(26,39,68,0.12);
+    border: 1px solid var(--kroger-border);
+    padding: 36px 40px;
+    width: 100%;
+    max-width: 400px;
+  }
+  .auth-logo { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+  .auth-logo-dot { width: 10px; height: 10px; background: var(--kroger-red); border-radius: 50%; }
+  .auth-logo-text { font-family: var(--font-head); font-weight: 800; font-size: 1rem; color: var(--kroger-navy); }
+  .auth-title { font-family: var(--font-head); font-size: 1.5rem; font-weight: 700; color: var(--kroger-navy); margin-bottom: 4px; }
+  .auth-sub { font-size: 0.8rem; color: var(--kroger-muted); margin-bottom: 24px; font-family: var(--font-mono); }
+  .auth-divider { height: 1px; background: var(--kroger-border); margin: 20px 0; }
+  .auth-link { text-align: center; font-size: 0.8rem; color: var(--kroger-muted); }
+  .auth-link a { color: var(--kroger-red); text-decoration: none; font-weight: 500; }
+  .form-group { margin-bottom: 16px; }
+</style>
+ 
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <span class="auth-logo-dot"></span>
+      <span class="auth-logo-text">Retail Intelligence</span>
+    </div>
+    <div class="auth-title">Create account</div>
+    <div class="auth-sub">Get access to the platform</div>
+ 
+    <form method="POST">
+      <div class="form-group">
+        <label class="k-label">Username</label>
+        <input type="text" name="username" class="k-input" placeholder="Choose a username" required>
+      </div>
+      <div class="form-group">
+        <label class="k-label">Password</label>
+        <input type="password" name="password" class="k-input" placeholder="Choose a password" required>
+      </div>
+      <div class="form-group">
+        <label class="k-label">Email</label>
+        <input type="email" name="email" class="k-input" placeholder="Enter your email" required>
+      </div>
+      <button type="submit" class="k-btn red" style="width:100%; margin-top:8px">Create Account</button>
+    </form>
+ 
+    <div class="auth-divider"></div>
+    <div class="auth-link">Already have an account? <a href="/">Sign in</a></div>
+  </div>
+</div>
+{% endblock %}

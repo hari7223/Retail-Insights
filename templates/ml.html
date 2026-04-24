@@ -1,0 +1,368 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="k-page-title">ML Model Results</div>
+<div class="k-page-sub">Gradient Boosting — Basket Analysis &nbsp;|&nbsp; Random Forest — Churn Prediction</div>
+
+<!-- ── KPI Strip ── -->
+{% if stats %}
+<div class="row g-3 mb-4">
+  <div class="col-md-2">
+    <div class="k-kpi">
+      <div class="k-kpi-label">Total Households</div>
+      <div class="k-kpi-value">{{ stats.total }}</div>
+    </div>
+  </div>
+  <div class="col-md-2">
+    <div class="k-kpi red">
+      <div class="k-kpi-label">High Churn Risk</div>
+      <div class="k-kpi-value">{{ stats.high_risk }}</div>
+    </div>
+  </div>
+  <div class="col-md-2">
+    <div class="k-kpi" style="background:#7c4700">
+      <div class="k-kpi-label">Medium Risk</div>
+      <div class="k-kpi-value">{{ stats.medium_risk }}</div>
+    </div>
+  </div>
+  <div class="col-md-2">
+    <div class="k-kpi" style="background:#14532d">
+      <div class="k-kpi-label">Low Risk</div>
+      <div class="k-kpi-value">{{ stats.low_risk }}</div>
+    </div>
+  </div>
+  <div class="col-md-2">
+    <div class="k-kpi teal">
+      <div class="k-kpi-label">Avg CLV</div>
+      <div class="k-kpi-value">${{ stats.avg_clv }}</div>
+    </div>
+  </div>
+  <div class="col-md-2">
+    <div class="k-kpi dark">
+      <div class="k-kpi-label">Max CLV</div>
+      <div class="k-kpi-value">${{ stats.max_clv }}</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- ══════════════════════════════════════════════════════════
+     Q7 · BASKET ANALYSIS — GRADIENT BOOSTING REGRESSOR
+     Retail Q: What are the commonly purchased product
+     combinations, and how can they drive cross-selling?
+     ══════════════════════════════════════════════════════════ -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:4px">
+  Basket Analysis — Gradient Boosting Regressor
+</div>
+
+{% if basket_ml %}
+<!-- Model card + metrics -->
+<div class="row g-3 mb-3">
+  <div class="col-md-4">
+    <div class="k-card" style="height:100%">
+      <div class="k-card-title">Model Overview</div>
+      <p style="font-size:0.82rem; color:var(--kroger-muted); margin-bottom:12px">
+        A Gradient Boosting Regressoris trained on the top
+        {{ basket_ml.n_pairs }} commodity pairs, using each commodity's individual
+        purchase frequency and combined spend as features.  The model predicts
+        <em>co-purchase frequency</em> which is how often any two commodities appear in
+        the same basket, enabling data-driven cross-sell targeting.
+      </p>
+      <div style="display:flex; gap:16px; flex-wrap:wrap">
+        <div style="text-align:center; background:#f8fafc; border-radius:8px; padding:12px 20px">
+          <div style="font-size:1.4rem; font-weight:700; color:var(--kroger-navy)">{{ basket_ml.r2 }}</div>
+          <div style="font-size:0.72rem; color:var(--kroger-muted)">R² Score</div>
+        </div>
+        <div style="text-align:center; background:#f8fafc; border-radius:8px; padding:12px 20px">
+          <div style="font-size:1.4rem; font-weight:700; color:var(--kroger-red)">{{ basket_ml.mae }}</div>
+          <div style="font-size:0.72rem; color:var(--kroger-muted)">MAE (baskets)</div>
+        </div>
+        <div style="text-align:center; background:#f8fafc; border-radius:8px; padding:12px 20px">
+          <div style="font-size:1.4rem; font-weight:700; color:#0f4c75">{{ basket_ml.n_pairs }}</div>
+          <div style="font-size:0.72rem; color:var(--kroger-muted)">Pairs Trained</div>
+        </div>
+      </div>
+      <div style="margin-top:14px; padding:10px 14px; background:#fff7ed; border-left:3px solid #d97706;
+                  border-radius:4px; font-size:0.78rem; color:#92400e">
+        <strong>Key Insight:</strong> The model reveals that the <em>less popular item's
+        frequency</em> (Min Item Frequency) is the strongest predictor of co-purchase success.
+        Cross-sell campaigns should focus on raising awareness of the lower-traffic commodity
+        in a pair.
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Feature Importance — What Drives Co-Purchases?</div>
+      <div id="basket-importance-chart"></div>
+    </div>
+  </div>
+
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Actual vs Predicted Co-Purchase Frequency</div>
+      <div id="basket-scatter-chart"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Cross-sell opportunities table -->
+<div class="k-card mb-3" style="padding:0; overflow:hidden">
+  <div class="k-card-title" style="padding:16px 20px 0">
+    Top Cross-Sell Opportunities — Actual &amp; Model-Predicted Co-Purchase Counts
+  </div>
+  <div style="overflow-x:auto">
+    <table class="k-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Commodity 1</th>
+          <th>Commodity 2</th>
+          <th>Actual Co-Purchases</th>
+          <th>GB Predicted</th>
+          <th>Cross-Sell Priority</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in basket_ml.pairs %}
+        <tr>
+          <td style="color:var(--kroger-muted)">{{ loop.index }}</td>
+          <td>{{ row.item_1 }}</td>
+          <td>{{ row.item_2 }}</td>
+          <td style="font-weight:500">{{ row.times_bought_together }}</td>
+          <td style="color:var(--kroger-navy)">{{ row.predicted }}</td>
+          <td>
+            {% if row.times_bought_together > 500 %}
+              <span class="k-badge red">High</span>
+            {% elif row.times_bought_together > 200 %}
+              <span class="k-badge yellow">Medium</span>
+            {% else %}
+              <span class="k-badge green">Emerging</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="k-alert mb-3">Basket ML analysis unavailable — check DB connection.</div>
+{% endif %}
+
+<!-- ══════════════════════════════════════════════════════════
+     Q8 · CHURN PREDICTION — RANDOM FOREST CLASSIFIER
+     Retail Q: Which customers are at risk of disengaging,
+     and how can retention strategies address this?
+     ══════════════════════════════════════════════════════════ -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:20px">
+  Churn Prediction — Random Forest Classifier
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-md-4">
+    <div class="k-card" style="height:100%">
+      <div class="k-card-title">Model Overview</div>
+      <p style="font-size:0.82rem; color:var(--kroger-muted); margin-bottom:12px">
+        The Random Forest Classifier (100 trees, balanced class weights)
+        predicts churn probability per household. Key features include Recency, Frequency,
+        and Monetary (RFM) values.
+      </p>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:14px">
+        <div style="text-align:center; background:#fef2f2; border-radius:8px; padding:10px 16px">
+          <div style="font-size:1.3rem; font-weight:700; color:var(--kroger-red)">{{ stats.high_risk }}</div>
+          <div style="font-size:0.72rem; color:var(--kroger-muted)">High Risk (>60%)</div>
+        </div>
+        <div style="text-align:center; background:#fff7ed; border-radius:8px; padding:10px 16px">
+          <div style="font-size:1.3rem; font-weight:700; color:#d97706">{{ stats.medium_risk }}</div>
+          <div style="font-size:0.72rem; color:var(--kroger-muted)">Medium (30–60%)</div>
+        </div>
+        <div style="text-align:center; background:#f0fdf4; border-radius:8px; padding:10px 16px">
+          <div style="font-size:1.3rem; font-weight:700; color:#16a34a">{{ stats.low_risk }}</div>
+          <div style="font-size:0.72rem; color:var(--kroger-muted)">Low Risk (<30%)</div>
+        </div>
+      </div>
+      <!-- Retention strategies -->
+      <div style="font-size:0.78rem; font-weight:600; color:var(--kroger-navy); margin-bottom:6px">
+        Retention Strategies
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px; font-size:0.76rem">
+        <div style="padding:7px 10px; background:#fef2f2; border-radius:6px; border-left:3px solid var(--kroger-red)">
+          <strong>High Risk:</strong> Personalised win-back offer + loyalty points double-up within 30 days.
+        </div>
+        <div style="padding:7px 10px; background:#fff7ed; border-radius:6px; border-left:3px solid #d97706">
+          <strong>Medium Risk:</strong> Targeted email with top-category coupon based on past spend patterns.
+        </div>
+        <div style="padding:7px 10px; background:#f0fdf4; border-radius:6px; border-left:3px solid #16a34a">
+          <strong>Low Risk:</strong> Upsell cross-category products surfaced from basket analysis.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Feature Importance — What Predicts Churn?</div>
+      <div id="churn-importance-chart"></div>
+    </div>
+  </div>
+
+  <div class="col-md-4">
+    <div class="k-card">
+      <div class="k-card-title">Correlation with Churn Label</div>
+      <div id="churn-corr-chart"></div>
+      <p style="font-size:0.72rem; color:var(--kroger-muted); margin-top:8px; padding:0 4px">
+        Positive correlation → feature increases churn probability.
+        Negative → feature is protective against churn.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Full Predictions Table ── -->
+<div style="font-family:var(--font-head); font-size:0.78rem; font-weight:700;
+            color:var(--kroger-red); text-transform:uppercase; letter-spacing:1px;
+            margin-bottom:10px; margin-top:20px">
+  All Household Predictions — sorted by churn risk
+</div>
+{% if predictions %}
+<div class="k-card" style="padding:0; overflow:hidden">
+  <div style="max-height:520px; overflow-y:auto">
+    <table class="k-table">
+      <thead>
+        <tr>
+          <th>HSHD_NUM</th>
+          <th>Predicted CLV ($)</th>
+          <th>Churn Probability</th>
+          <th>Risk Segment</th>
+          <th>Recency (days)</th>
+          <th>Frequency</th>
+          <th>Total Spend ($)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in predictions %}
+        <tr>
+          <td>{{ r.HSHD_NUM }}</td>
+          <td>${{ "%.2f"|format(r.clv_score) }}</td>
+          <td>
+            <div style="display:flex; align-items:center; gap:8px">
+              <div style="width:80px; height:6px; background:#f1f5f9; border-radius:3px; overflow:hidden">
+                <div style="width:{{ (r.churn_prob * 100)|int }}%; height:100%;
+                  background:{% if r.churn_prob > 0.6 %}#E31837{% elif r.churn_prob > 0.3 %}#d97706{% else %}#16a34a{% endif %};
+                  border-radius:3px;"></div>
+              </div>
+              <span style="font-size:0.72rem; color:var(--kroger-muted)">
+                {{ "%.0f"|format(r.churn_prob * 100) }}%
+              </span>
+            </div>
+          </td>
+          <td>
+            <span class="k-badge {% if r.risk_segment=='High Risk' %}red{% elif r.risk_segment=='Medium Risk' %}yellow{% else %}green{% endif %}">
+              {{ r.risk_segment }}
+            </span>
+          </td>
+          <td>{{ r.recency }}</td>
+          <td>{{ r.frequency }}</td>
+          <td>${{ "%.2f"|format(r.total_spend) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="k-alert">ML models not loaded. Run <code>train_models.py</code> first.</div>
+{% endif %}
+
+<!-- ── Charts ── -->
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<script>
+const navy = '#1A2744', red = '#E31837', teal = '#0f4c75';
+const font = { family: 'DM Sans, sans-serif', size: 11, color: '#475569' };
+
+{% if basket_ml %}
+// Q7 — Feature Importance (Gradient Boosting)
+const bImportance = {{ basket_ml.importances | tojson }};
+Plotly.newPlot('basket-importance-chart', [{
+  x: bImportance.map(d => d.importance),
+  y: bImportance.map(d => d.feature),
+  type: 'bar', orientation: 'h',
+  marker: { color: bImportance.map((_, i) => i === 0 ? red : navy) }
+}], {
+  margin: { t: 10, b: 40, l: 150, r: 10 }, font, height: 220,
+  plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+  xaxis: { title: { text: 'Importance', font }, gridcolor: '#f1f5f9', tickfont: font },
+  yaxis: { tickfont: { ...font, size: 10 } },
+  showlegend: false
+});
+
+// Q7 — Actual vs Predicted scatter
+const bPairs = {{ basket_ml.pairs | tojson }};
+Plotly.newPlot('basket-scatter-chart', [
+  {
+    x: bPairs.map(d => d.times_bought_together),
+    y: bPairs.map(d => d.predicted),
+    mode: 'markers',
+    type: 'scatter',
+    marker: { color: teal, size: 7, opacity: 0.8 },
+    text: bPairs.map(d => `${d.item_1} + ${d.item_2}`),
+    hovertemplate: '%{text}<br>Actual: %{x}<br>Predicted: %{y}<extra></extra>'
+  },
+  {
+    x: [0, Math.max(...bPairs.map(d => d.times_bought_together))],
+    y: [0, Math.max(...bPairs.map(d => d.times_bought_together))],
+    mode: 'lines', type: 'scatter',
+    line: { color: red, dash: 'dash', width: 1 },
+    name: 'Perfect fit'
+  }
+], {
+  margin: { t: 10, b: 50, l: 55, r: 10 }, font, height: 220,
+  plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+  xaxis: { title: { text: 'Actual', font }, gridcolor: '#f1f5f9', tickfont: font },
+  yaxis: { title: { text: 'Predicted', font }, gridcolor: '#f1f5f9', tickfont: font },
+  showlegend: false
+});
+{% endif %}
+
+{% if churn_importances %}
+// Q8 — Churn Feature Importance (Random Forest)
+const cImportance = {{ churn_importances | tojson }};
+Plotly.newPlot('churn-importance-chart', [{
+  x: cImportance.map(d => d.importance),
+  y: cImportance.map(d => d.feature),
+  type: 'bar', orientation: 'h',
+  marker: { color: cImportance.map((_, i) => i === 0 ? red : navy) }
+}], {
+  margin: { t: 10, b: 40, l: 140, r: 10 }, font, height: 240,
+  plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+  xaxis: { title: { text: 'Importance', font }, gridcolor: '#f1f5f9', tickfont: font },
+  yaxis: { tickfont: { ...font, size: 10 } },
+  showlegend: false
+});
+{% endif %}
+
+{% if churn_correlations %}
+// Q8 — Correlation with Churn
+const cCorr = {{ churn_correlations | tojson }};
+Plotly.newPlot('churn-corr-chart', [{
+  x: cCorr.map(d => d.correlation),
+  y: cCorr.map(d => d.feature),
+  type: 'bar', orientation: 'h',
+  marker: { color: cCorr.map(d => d.correlation > 0 ? red : '#16a34a') }
+}], {
+  margin: { t: 10, b: 40, l: 140, r: 10 }, font, height: 240,
+  plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+  xaxis: { title: { text: 'Pearson r', font }, gridcolor: '#f1f5f9',
+           tickfont: font, zeroline: true, zerolinecolor: '#cbd5e1' },
+  yaxis: { tickfont: { ...font, size: 10 } },
+  showlegend: false
+});
+{% endif %}
+</script>
+
+{% endblock %}
