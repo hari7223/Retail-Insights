@@ -536,7 +536,7 @@ def dashboard():
         churn_counts = preds['risk_segment'].value_counts().to_dict()
         avg_clv = round(preds['clv_score'].mean(), 2)
         high_risk_count = int((preds['risk_segment'] == 'High Risk').sum())
-    except:
+    except Exception:
         top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
 
     return render_template("dashboard.html",

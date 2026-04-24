@@ -20,14 +20,10 @@ def get_engine():
     password = os.getenv('SQL_PASSWORD')
     return create_engine(f"mssql+pymssql://{user}:{password}@{server}/{database}")
 
-def get_db():
-    return get_engine().connect()
-
 def load_data():
-    conn = get_db()
-    tx = pd.read_sql("SELECT * FROM transactions", conn)
-    hh = pd.read_sql("SELECT * FROM households", conn)
-    conn.close()
+    with get_engine().connect() as conn:
+        tx = pd.read_sql("SELECT * FROM transactions", conn)
+        hh = pd.read_sql("SELECT * FROM households", conn)
 
     # Convert types after loading since all columns are VARCHAR in DB
     tx['SPEND'] = pd.to_numeric(tx['SPEND'], errors='coerce')
