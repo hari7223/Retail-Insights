@@ -6,3 +6,4 @@ joblib
 werkzeug
 python-dotenv
 gunicorn
+pymssql

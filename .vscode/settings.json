@@ -1,0 +1,4 @@
+{
+    "appService.defaultWebAppToDeploy": "/subscriptions/cd862b40-b7e7-488d-80af-38c75b354b7c/resourceGroups/introtocc2026_hari/providers/Microsoft.Web/sites/retailinsights",
+    "appService.deploySubpath": "."
+}
