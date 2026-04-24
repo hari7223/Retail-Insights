@@ -19,6 +19,17 @@ _CHURN_FEATURE_LABELS = {
 _clv_model   = None
 _churn_model = None
 
+def _retrain():
+    """Retrain models in-process — used when pkl files are missing or incompatible."""
+    import os
+    os.makedirs("models", exist_ok=True)
+    from train_models import load_data, build_features, train_clv_model, train_churn_model
+    tx, hh = load_data()
+    features = build_features(tx, hh)
+    train_clv_model(features)
+    train_churn_model(features)
+    features.to_csv("models/features.csv", index=False)
+
 def _load_models():
     global _clv_model, _churn_model
     if _clv_model is not None:
@@ -27,9 +38,7 @@ def _load_models():
         _clv_model   = joblib.load("models/clv_model.pkl")
         _churn_model = joblib.load("models/churn_model.pkl")
     except Exception:
-        # pkl incompatible with current sklearn — retrain automatically
-        import subprocess, sys
-        subprocess.run([sys.executable, "train_models.py"], check=True)
+        _retrain()
         _clv_model   = joblib.load("models/clv_model.pkl")
         _churn_model = joblib.load("models/churn_model.pkl")
 

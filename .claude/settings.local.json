@@ -21,7 +21,8 @@
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip3 install *)",
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 train_models.py)",
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -c ' *)",
-      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip3 freeze *)"
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip3 freeze *)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -c \"import ast; ast.parse\\(open\\('ml_models.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }
