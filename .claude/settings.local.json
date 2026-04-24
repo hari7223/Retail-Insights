@@ -20,7 +20,8 @@
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -c \"import sklearn; print\\('sklearn:', sklearn.__version__\\)\")",
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip3 install *)",
       "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 train_models.py)",
-      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -c ' *)"
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -c ' *)",
+      "Bash(/Library/Frameworks/Python.framework/Versions/3.13/bin/pip3 freeze *)"
     ]
   }
 }

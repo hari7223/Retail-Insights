@@ -21,7 +21,15 @@ _churn_model = None
 
 def _load_models():
     global _clv_model, _churn_model
-    if _clv_model is None:
+    if _clv_model is not None:
+        return
+    try:
+        _clv_model   = joblib.load("models/clv_model.pkl")
+        _churn_model = joblib.load("models/churn_model.pkl")
+    except Exception:
+        # pkl incompatible with current sklearn — retrain automatically
+        import subprocess, sys
+        subprocess.run([sys.executable, "train_models.py"], check=True)
         _clv_model   = joblib.load("models/clv_model.pkl")
         _churn_model = joblib.load("models/churn_model.pkl")
 
