@@ -182,103 +182,61 @@ def upload():
         import tempfile
         import os
 
-        # Primary key(s) used to detect duplicates and trigger updates
-        PKS = {
-            "households":   ["HSHD_NUM"],
-            "products":     ["PRODUCT_NUM"],
-            "transactions": ["BASKET_NUM", "PRODUCT_NUM"],
-        }
-
-        files = {}
+        # 1. Grab the uploaded files
+        files_to_process = {}
         for key in ["households", "transactions", "products"]:
             f = request.files.get(key)
-            if f:
+            if f and f.filename:
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
                 f.save(tmp.name)
-                files[key] = tmp.name
+                files_to_process[key] = tmp.name
 
-        if len(files) == 3:
-            try:
-                engine = get_engine()
-                summary = []
+        # THE FIX: Enforce exactly 3 files
+        if len(files_to_process) != 3:
+            # Clean up any partial files that were saved before throwing the error
+            for p in files_to_process.values():
+                if os.path.exists(p):
+                    os.unlink(p)
+            flash("Upload failed: You must upload all three files (Households, Transactions, and Products) at the same time.")
+            return render_template("upload.html")
+
+        try:
+            engine = get_engine()
+            summary = []
+            
+            for table, path in files_to_process.items():
                 
-                for table, path in [("households", files["households"]), 
-                                    ("products", files["products"]), 
-                                    ("transactions", files["transactions"])]:
-                    
-                    staging = f"_stage_{table}"
-                    pk_cols = PKS[table]
-                    
-                    # 1. Clear out any old staging tables
-                    with engine.connect() as conn:
-                        conn.execute(text(f"DROP TABLE IF EXISTS [{staging}]"))
-                        conn.commit()
+                # 2. Delete existing data
+                with engine.connect() as conn:
+                    conn.execute(text(f"DELETE FROM [{table}]"))
+                    conn.commit()
 
-                    # 2. Chunking to prevent memory crashes on large files
-                    total_rows = 0
-                    all_columns = []
+                # 3. Load the new CSV into the empty table
+                total_rows = 0
+                for chunk in pd.read_csv(path, chunksize=50000, low_memory=False):
+                    chunk.columns = chunk.columns.str.strip()
+                    chunk = chunk.astype(str).replace('nan', None)
                     
-                    for chunk in pd.read_csv(path, chunksize=50000, low_memory=False):
-                        chunk.columns = chunk.columns.str.strip()
-                        chunk = chunk.astype(str).replace('nan', None)
-                        
-                        if not all_columns:
-                            all_columns = chunk.columns.tolist()
-                            
-                        chunk.to_sql(staging, engine, if_exists="append", index=False, chunksize=5000)
-                        total_rows += len(chunk)
-                        
-                    # 3. Build dynamic SQL for the MERGE (Upsert) operation
-                    non_pk_cols = [c for c in all_columns if c not in pk_cols]
+                    chunk.to_sql(table, engine, if_exists="append", index=False, chunksize=5000)
+                    total_rows += len(chunk)
                     
-                    join_condition = " AND ".join([f"m.[{c}] = s.[{c}]" for c in pk_cols])
-                    insert_cols = ", ".join([f"[{c}]" for c in all_columns])
-                    insert_vals = ", ".join([f"s.[{c}]" for c in all_columns])
-                    
-                    # If there are columns to update, build the UPDATE SET clause
-                    update_clause = ""
-                    if non_pk_cols:
-                        update_set = ", ".join([f"m.[{c}] = s.[{c}]" for c in non_pk_cols])
-                        update_clause = f"WHEN MATCHED THEN UPDATE SET {update_set}"
+                summary.append(f"{table}: {total_rows} replaced")
 
-                    # 4. Execute the MERGE
-                    # Note: T-SQL MERGE statements MUST end with a semicolon
-                    merge_query = f"""
-                        MERGE INTO [{table}] AS m
-                        USING [{staging}] AS s
-                        ON {join_condition}
-                        {update_clause}
-                        WHEN NOT MATCHED BY TARGET THEN
-                            INSERT ({insert_cols})
-                            VALUES ({insert_vals});
-                    """
-
-                    with engine.connect() as conn:
-                        result = conn.execute(text(merge_query))
-                        # In a MERGE, rowcount returns total rows inserted + updated
-                        processed = result.rowcount 
-                        
-                        conn.execute(text(f"DROP TABLE [{staging}]"))
-                        conn.commit()
-
-                    summary.append(f"{table}: {processed} inserted/updated")
-
-                # 5. Invalidate all caches to ensure data is fresh on next load
-                if os.path.exists(DASHBOARD_CACHE_FILE): os.remove(DASHBOARD_CACHE_FILE)
-                if os.path.exists(BASKET_CACHE_FILE): os.remove(BASKET_CACHE_FILE)
-                if os.path.exists("models/clv_model.pkl"): os.remove("models/clv_model.pkl")
-                if os.path.exists("models/churn_model.pkl"): os.remove("models/churn_model.pkl")
-                
-                flash("Upload complete — " + " | ".join(summary))
-                
-            except Exception as e:
-                flash(f"Upload failed: {e}")
-            finally:
-                for p in files.values():
-                    if os.path.exists(p):
-                        os.unlink(p)
-        else:
-            flash("Please upload all three files.")
+            # 4. Invalidate caches and models
+            if os.path.exists(DASHBOARD_CACHE_FILE): os.remove(DASHBOARD_CACHE_FILE)
+            if os.path.exists(BASKET_CACHE_FILE): os.remove(BASKET_CACHE_FILE)
+            if os.path.exists("models/clv_model.pkl"): os.remove("models/clv_model.pkl")
+            if os.path.exists("models/churn_model.pkl"): os.remove("models/churn_model.pkl")
+            
+            flash("Upload complete — " + " | ".join(summary))
+            
+        except Exception as e:
+            flash(f"Upload failed: {e}")
+        finally:
+            # Final cleanup
+            for p in files_to_process.values():
+                if os.path.exists(p):
+                    os.unlink(p)
             
     return render_template("upload.html")
 
