@@ -105,11 +105,18 @@ _engine = None
 def get_engine():
     global _engine
     if _engine is None:
-        server = os.getenv('SQL_SERVER')
+        server   = os.getenv('SQL_SERVER')
         database = os.getenv('SQL_DATABASE')
-        user = os.getenv('SQL_USER')
+        user     = os.getenv('SQL_USER')
         password = os.getenv('SQL_PASSWORD')
-        _engine = create_engine(f"mssql+pymssql://{user}:{password}@{server}/{database}")
+        _engine = create_engine(
+            f"mssql+pymssql://{user}:{password}@{server}/{database}",
+            pool_pre_ping=True,   # detect & drop stale connections before use
+            pool_recycle=1800,    # recycle every 30 min (Azure kills idle after ~30 min)
+            pool_size=3,          # keep 3 persistent connections warm
+            max_overflow=5,       # allow 5 extra under burst load
+            connect_args={"timeout": 30, "login_timeout": 30}
+        )
     return _engine
 
 def login_required(f):
@@ -316,6 +323,10 @@ def dashboard():
         brand_income    = cached["brand_income"]
         dept            = cached["dept"]
         commodity       = cached["commodity"]
+        top_clv         = cached.get("top_clv", [])
+        churn_counts    = cached.get("churn_counts", {})
+        avg_clv         = cached.get("avg_clv", 0)
+        high_risk_count = cached.get("high_risk_count", 0)
     else:
         with engine.connect() as conn:
             # ── Q1: Demographics & Engagement ─────────────────────────────────
@@ -516,6 +527,19 @@ def dashboard():
                 ORDER BY total_spend DESC
             """, conn)
 
+        # ── ML summary for dashboard ──────────────────────────────────────────
+        try:
+            from ml_models import get_all_predictions
+            preds = get_all_predictions()
+            top_clv = preds.nlargest(10, 'clv_score')[
+                ['HSHD_NUM','clv_score','churn_prob','risk_segment','frequency','recency']
+            ].to_dict("records")
+            churn_counts = preds['risk_segment'].value_counts().to_dict()
+            avg_clv = round(preds['clv_score'].mean(), 2)
+            high_risk_count = int((preds['risk_segment'] == 'High Risk').sum())
+        except Exception:
+            top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
+
         _dashboard_cache["data"] = {
             "ts": time.time(),
             "income": income, "hhsize": hhsize, "children": children,
@@ -524,20 +548,9 @@ def dashboard():
             "seasonal_commodity": seasonal_commodity, "brand": brand,
             "organic": organic, "brand_income": brand_income,
             "dept": dept, "commodity": commodity,
+            "top_clv": top_clv, "churn_counts": churn_counts,
+            "avg_clv": avg_clv, "high_risk_count": high_risk_count,
         }
-
-    # ── ML ────────────────────────────────────────────────────────────────────
-    try:
-        from ml_models import get_all_predictions
-        preds = get_all_predictions()
-        top_clv = preds.nlargest(10, 'clv_score')[
-            ['HSHD_NUM','clv_score','churn_prob','risk_segment','frequency','recency']
-        ].to_dict("records")
-        churn_counts = preds['risk_segment'].value_counts().to_dict()
-        avg_clv = round(preds['clv_score'].mean(), 2)
-        high_risk_count = int((preds['risk_segment'] == 'High Risk').sum())
-    except Exception:
-        top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
 
     return render_template("dashboard.html",
         dept=dept.to_dict("records"),
