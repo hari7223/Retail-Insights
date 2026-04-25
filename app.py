@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash
-import os, time, pandas as pd
+import os, time, pandas as pd, threading
 import concurrent.futures
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import create_engine, text
@@ -22,16 +22,22 @@ def compute_basket_ml():
     engine = get_engine()
     with engine.connect() as conn:
         pairs = pd.read_sql("""
+            WITH top_baskets AS (
+                SELECT DISTINCT TOP 5000 BASKET_NUM FROM transactions
+            ),
+            basket_comm AS (
+                SELECT DISTINCT t.BASKET_NUM, p.COMMODITY
+                FROM transactions t
+                JOIN products p   ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                JOIN top_baskets b ON t.BASKET_NUM  = b.BASKET_NUM
+                WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL
+            )
             SELECT TOP 100
                 c1.COMMODITY as item_1,
                 c2.COMMODITY as item_2,
                 COUNT(*) as times_bought_together
-            FROM (SELECT DISTINCT t.BASKET_NUM, p.COMMODITY
-                  FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
-                  WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL) c1
-            JOIN (SELECT DISTINCT t.BASKET_NUM, p.COMMODITY
-                  FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
-                  WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL) c2
+            FROM basket_comm c1
+            JOIN basket_comm c2
                 ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY
             GROUP BY c1.COMMODITY, c2.COMMODITY
             ORDER BY times_bought_together DESC
@@ -102,6 +108,41 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 
+# ── Background ML training ─────────────────────────────────────────────────────
+_training_status = {"running": False, "done": False, "error": None}
+
+def _start_background_training():
+    """Train ML models in a daemon thread — never blocks a web request."""
+    def _train():
+        _training_status["running"] = True
+        try:
+            os.makedirs("models", exist_ok=True)
+            from train_models import load_data, build_features, train_clv_model, train_churn_model
+            tx, hh = load_data()
+            features = build_features(tx, hh)
+            train_clv_model(features)
+            train_churn_model(features)
+            features.to_csv("models/features.csv", index=False)
+            # Reset cached models so next /ml request reloads fresh pkl files
+            try:
+                import ml_models as _mlm
+                _mlm._clv_model = None
+                _mlm._churn_model = None
+            except Exception:
+                pass
+            _training_status["done"] = True
+        except Exception as exc:
+            _training_status["error"] = str(exc)
+        finally:
+            _training_status["running"] = False
+
+    threading.Thread(target=_train, daemon=True).start()
+
+# Auto-kick-off training if pkl files are missing
+if not (os.path.exists("models/clv_model.pkl") and
+        os.path.exists("models/churn_model.pkl")):
+    _start_background_training()
+
 _engine = None
 def get_engine():
     global _engine
@@ -114,8 +155,8 @@ def get_engine():
             f"mssql+pymssql://{user}:{password}@{server}/{database}",
             pool_pre_ping=True,   # detect & drop stale connections before use
             pool_recycle=1800,    # recycle every 30 min (Azure kills idle after ~30 min)
-            pool_size=3,          # keep 3 persistent connections warm
-            max_overflow=5,       # allow 5 extra under burst load
+            pool_size=8,          # enough for 14 parallel dashboard queries
+            max_overflow=4,       # allow 4 extra under burst
             connect_args={"timeout": 30, "login_timeout": 30}
         )
     return _engine
@@ -387,18 +428,22 @@ def dashboard():
                 GROUP BY p.DEPARTMENT, t.YEAR ORDER BY t.YEAR, total_spend DESC
             """,
             "basket": """
-                SELECT TOP 10 c1.COMMODITY as item_1, c2.COMMODITY as item_2,
+                WITH top_baskets AS (
+                    SELECT DISTINCT TOP 5000 BASKET_NUM FROM transactions
+                ),
+                basket_comm AS (
+                    SELECT DISTINCT t.BASKET_NUM, p.COMMODITY
+                    FROM transactions t
+                    JOIN products p    ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                    JOIN top_baskets b ON t.BASKET_NUM  = b.BASKET_NUM
+                    WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL
+                )
+                SELECT TOP 10
+                    c1.COMMODITY as item_1, c2.COMMODITY as item_2,
                     COUNT(*) as times_bought_together
-                FROM (
-                    SELECT DISTINCT t.BASKET_NUM, p.COMMODITY
-                    FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
-                    WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL
-                ) c1
-                JOIN (
-                    SELECT DISTINCT t.BASKET_NUM, p.COMMODITY
-                    FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
-                    WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL
-                ) c2 ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY
+                FROM basket_comm c1
+                JOIN basket_comm c2
+                    ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY
                 GROUP BY c1.COMMODITY, c2.COMMODITY
                 ORDER BY times_bought_together DESC
             """,
@@ -556,6 +601,17 @@ def dashboard():
 @app.route("/ml")
 @login_required
 def ml_results():
+    # If still training, return immediately — don't hang the request
+    if _training_status["running"]:
+        flash("⏳ ML models are being trained in the background (1–2 min). Refresh in a moment.")
+        return render_template("ml.html", predictions=[], stats={},
+                               churn_importances=[], churn_correlations=[], basket_ml=None)
+    if _training_status["error"]:
+        flash(f"Training error: {_training_status['error']} — retrying now.")
+        _start_background_training()
+        return render_template("ml.html", predictions=[], stats={},
+                               churn_importances=[], churn_correlations=[], basket_ml=None)
+
     all_preds, stats, churn_importances, churn_correlations = [], {}, [], []
     try:
         from ml_models import get_all_predictions, get_churn_importances, get_churn_correlations
