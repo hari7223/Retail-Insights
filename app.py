@@ -1,12 +1,13 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 import os, time, pandas as pd
+import concurrent.futures
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 _dashboard_cache  = {}
 _basket_ml_cache  = {}
-_CACHE_TTL = 300  # seconds
+_CACHE_TTL = 1800  # 30 minutes
 
 def compute_basket_ml():
     """Train a Gradient Boosting Regressor on commodity-pair co-purchase data."""
@@ -328,217 +329,195 @@ def dashboard():
         avg_clv         = cached.get("avg_clv", 0)
         high_risk_count = cached.get("high_risk_count", 0)
     else:
-        with engine.connect() as conn:
-            # ── Q1: Demographics & Engagement ─────────────────────────────────
+        # ── Run all 14 queries in parallel ────────────────────────────────────
+        def _q(sql):
+            """Each call gets its own pooled connection so queries run concurrently."""
+            with get_engine().connect() as c:
+                return pd.read_sql(sql, c)
 
-            income = pd.read_sql("""
+        SQLS = {
+            "income": """
                 SELECT h.INCOME_RANGE,
                        AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend,
                        COUNT(DISTINCT t.HSHD_NUM) as hh_count
-                FROM transactions t
-                JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
+                FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
                 WHERE h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL
-                GROUP BY h.INCOME_RANGE
-                ORDER BY avg_spend DESC
-            """, conn)
-
-            hhsize = pd.read_sql("""
-                SELECT h.HH_SIZE,
-                       AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend
-                FROM transactions t
-                JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
+                GROUP BY h.INCOME_RANGE ORDER BY avg_spend DESC
+            """,
+            "hhsize": """
+                SELECT h.HH_SIZE, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend
+                FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
                 WHERE h.HH_SIZE NOT IN ('null','') AND h.HH_SIZE IS NOT NULL
-                GROUP BY h.HH_SIZE
-                ORDER BY h.HH_SIZE
-            """, conn)
-
-            children = pd.read_sql("""
+                GROUP BY h.HH_SIZE ORDER BY h.HH_SIZE
+            """,
+            "children": """
                 SELECT
                     CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown'
                          WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children'
                          ELSE 'No Children' END as children_status,
                     AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend,
                     COUNT(DISTINCT t.HSHD_NUM) as hh_count
-                FROM transactions t
-                JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
+                FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
                 GROUP BY
                     CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown'
                          WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children'
                          ELSE 'No Children' END
-            """, conn)
-
-            region = pd.read_sql("""
+            """,
+            "region": """
                 SELECT STORE_R,
                        SUM(CAST(SPEND AS DECIMAL(10,2))) as total_spend,
                        COUNT(DISTINCT HSHD_NUM) as unique_hh
                 FROM transactions
                 WHERE STORE_R NOT IN ('null','') AND STORE_R IS NOT NULL
-                GROUP BY STORE_R
-                ORDER BY total_spend DESC
-            """, conn)
-
-            # ── Q2: Engagement Over Time ───────────────────────────────────────
-
-            weekly = pd.read_sql("""
+                GROUP BY STORE_R ORDER BY total_spend DESC
+            """,
+            "weekly": """
                 SELECT CAST(WEEK_NUM AS INT) as WEEK_NUM,
                        CAST(YEAR AS INT) as YEAR,
                        SUM(CAST(SPEND AS DECIMAL(10,2))) as spend
                 FROM transactions
                 GROUP BY WEEK_NUM, YEAR
                 ORDER BY YEAR, CAST(WEEK_NUM AS INT)
-            """, conn)
-
-            dept_year = pd.read_sql("""
-                SELECT p.DEPARTMENT,
-                       CAST(t.YEAR AS INT) as YEAR,
+            """,
+            "dept_year": """
+                SELECT p.DEPARTMENT, CAST(t.YEAR AS INT) as YEAR,
                        SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend
-                FROM transactions t
-                JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
                 WHERE t.YEAR NOT IN ('null','') AND t.YEAR IS NOT NULL
-                GROUP BY p.DEPARTMENT, t.YEAR
-                ORDER BY t.YEAR, total_spend DESC
-            """, conn)
-
-            # ── Q3: Basket Analysis — pre-aggregate at commodity level ─────────
-            # Aggregating at commodity level first avoids the expensive
-            # row-level self-join on the full transactions table.
-            basket = pd.read_sql("""
-                SELECT TOP 10
-                    c1.COMMODITY as item_1,
-                    c2.COMMODITY as item_2,
+                GROUP BY p.DEPARTMENT, t.YEAR ORDER BY t.YEAR, total_spend DESC
+            """,
+            "basket": """
+                SELECT TOP 10 c1.COMMODITY as item_1, c2.COMMODITY as item_2,
                     COUNT(*) as times_bought_together
                 FROM (
                     SELECT DISTINCT t.BASKET_NUM, p.COMMODITY
-                    FROM transactions t
-                    JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                    FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
                     WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL
                 ) c1
                 JOIN (
                     SELECT DISTINCT t.BASKET_NUM, p.COMMODITY
-                    FROM transactions t
-                    JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                    FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
                     WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL
                 ) c2 ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY
                 GROUP BY c1.COMMODITY, c2.COMMODITY
                 ORDER BY times_bought_together DESC
-            """, conn)
-
-            # ── Q4: Seasonal Trends ────────────────────────────────────────────
-
-            seasonal = pd.read_sql("""
+            """,
+            "seasonal": """
                 SELECT
-                    CASE
-                        WHEN CAST(WEEK_NUM AS INT) BETWEEN 1  AND 13 THEN 'Spring'
-                        WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer'
-                        WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall'
-                        ELSE 'Winter'
-                    END as season,
+                    CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1  AND 13 THEN 'Spring'
+                         WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer'
+                         WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall'
+                         ELSE 'Winter' END as season,
                     SUM(CAST(SPEND AS DECIMAL(10,2))) as total_spend,
                     AVG(CAST(SPEND AS DECIMAL(10,2))) as avg_spend,
                     COUNT(DISTINCT HSHD_NUM) as unique_hh
                 FROM transactions
                 WHERE WEEK_NUM NOT IN ('null','') AND WEEK_NUM IS NOT NULL
                 GROUP BY
-                    CASE
-                        WHEN CAST(WEEK_NUM AS INT) BETWEEN 1  AND 13 THEN 'Spring'
-                        WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer'
-                        WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall'
-                        ELSE 'Winter'
-                    END
-            """, conn)
-
-            seasonal_commodity = pd.read_sql("""
+                    CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1  AND 13 THEN 'Spring'
+                         WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer'
+                         WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall'
+                         ELSE 'Winter' END
+            """,
+            "seasonal_commodity": """
                 SELECT TOP 20
-                    CASE
-                        WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1  AND 13 THEN 'Spring'
-                        WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer'
-                        WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall'
-                        ELSE 'Winter'
-                    END as season,
+                    CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1  AND 13 THEN 'Spring'
+                         WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer'
+                         WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall'
+                         ELSE 'Winter' END as season,
                     p.DEPARTMENT,
                     SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend
-                FROM transactions t
-                JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
                 WHERE t.WEEK_NUM NOT IN ('null','') AND t.WEEK_NUM IS NOT NULL
                 GROUP BY
-                    CASE
-                        WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1  AND 13 THEN 'Spring'
-                        WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer'
-                        WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall'
-                        ELSE 'Winter'
-                    END,
+                    CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1  AND 13 THEN 'Spring'
+                         WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer'
+                         WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall'
+                         ELSE 'Winter' END,
                     p.DEPARTMENT
                 ORDER BY season, total_spend DESC
-            """, conn)
-
-            # ── Q5: Brand Preferences ──────────────────────────────────────────
-
-            brand = pd.read_sql("""
+            """,
+            "brand": """
                 SELECT p.BRAND_TY,
                        SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend,
                        COUNT(*) as transaction_count
-                FROM transactions t
-                JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
                 WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL
                 GROUP BY p.BRAND_TY
-            """, conn)
-
-            organic = pd.read_sql("""
+            """,
+            "organic": """
                 SELECT p.NATURAL_ORGANIC_FLAG,
                        SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend,
                        COUNT(DISTINCT t.HSHD_NUM) as buyers
-                FROM transactions t
-                JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
                 WHERE p.NATURAL_ORGANIC_FLAG NOT IN ('null','') AND p.NATURAL_ORGANIC_FLAG IS NOT NULL
                 GROUP BY p.NATURAL_ORGANIC_FLAG
-            """, conn)
-
-            brand_income = pd.read_sql("""
-                SELECT h.INCOME_RANGE,
-                       p.BRAND_TY,
+            """,
+            "brand_income": """
+                SELECT h.INCOME_RANGE, p.BRAND_TY,
                        SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend
                 FROM transactions t
                 JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
                 JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
                 WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL
                   AND h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL
-                GROUP BY h.INCOME_RANGE, p.BRAND_TY
-                ORDER BY h.INCOME_RANGE, p.BRAND_TY
-            """, conn)
-
-            # ── General ───────────────────────────────────────────────────────
-
-            dept = pd.read_sql("""
+                GROUP BY h.INCOME_RANGE, p.BRAND_TY ORDER BY h.INCOME_RANGE, p.BRAND_TY
+            """,
+            "dept": """
                 SELECT p.DEPARTMENT,
                        SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend,
                        COUNT(DISTINCT t.HSHD_NUM) as unique_households
-                FROM transactions t
-                JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
-                GROUP BY p.DEPARTMENT
-                ORDER BY total_spend DESC
-            """, conn)
-
-            commodity = pd.read_sql("""
+                FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                GROUP BY p.DEPARTMENT ORDER BY total_spend DESC
+            """,
+            "commodity": """
                 SELECT TOP 10 p.COMMODITY,
                        SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend
-                FROM transactions t
-                JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
-                GROUP BY p.COMMODITY
-                ORDER BY total_spend DESC
-            """, conn)
+                FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+                GROUP BY p.COMMODITY ORDER BY total_spend DESC
+            """,
+        }
 
-        # ── ML summary for dashboard ──────────────────────────────────────────
-        try:
-            from ml_models import get_all_predictions
-            preds = get_all_predictions()
-            top_clv = preds.nlargest(10, 'clv_score')[
-                ['HSHD_NUM','clv_score','churn_prob','risk_segment','frequency','recency']
-            ].to_dict("records")
-            churn_counts = preds['risk_segment'].value_counts().to_dict()
-            avg_clv = round(preds['clv_score'].mean(), 2)
-            high_risk_count = int((preds['risk_segment'] == 'High Risk').sum())
-        except Exception:
-            top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
+        results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+            fmap = {ex.submit(_q, sql): name for name, sql in SQLS.items()}
+            for fut in concurrent.futures.as_completed(fmap):
+                name = fmap[fut]
+                try:
+                    results[name] = fut.result()
+                except Exception:
+                    results[name] = pd.DataFrame()
+
+        income             = results.get("income",             pd.DataFrame())
+        hhsize             = results.get("hhsize",             pd.DataFrame())
+        children           = results.get("children",           pd.DataFrame())
+        region             = results.get("region",             pd.DataFrame())
+        weekly             = results.get("weekly",             pd.DataFrame())
+        dept_year          = results.get("dept_year",          pd.DataFrame())
+        basket             = results.get("basket",             pd.DataFrame())
+        seasonal           = results.get("seasonal",           pd.DataFrame())
+        seasonal_commodity = results.get("seasonal_commodity", pd.DataFrame())
+        brand              = results.get("brand",              pd.DataFrame())
+        organic            = results.get("organic",            pd.DataFrame())
+        brand_income       = results.get("brand_income",       pd.DataFrame())
+        dept               = results.get("dept",               pd.DataFrame())
+        commodity          = results.get("commodity",          pd.DataFrame())
+
+        # ── ML — only run if models are already trained (never block dashboard) ─
+        top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
+        if (os.path.exists("models/clv_model.pkl") and
+                os.path.exists("models/churn_model.pkl")):
+            try:
+                from ml_models import get_all_predictions
+                preds = get_all_predictions()
+                top_clv = preds.nlargest(10, 'clv_score')[
+                    ['HSHD_NUM','clv_score','churn_prob','risk_segment','frequency','recency']
+                ].to_dict("records")
+                churn_counts    = preds['risk_segment'].value_counts().to_dict()
+                avg_clv         = round(preds['clv_score'].mean(), 2)
+                high_risk_count = int((preds['risk_segment'] == 'High Risk').sum())
+            except Exception:
+                pass
 
         _dashboard_cache["data"] = {
             "ts": time.time(),
