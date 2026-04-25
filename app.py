@@ -142,7 +142,6 @@ def data_pull():
 
     order = f"{sort_col} {'DESC' if sort_dir == 'desc' else 'ASC'}"
     
-    # FIX 1: Swapped %s to ? for pyodbc parameterization
     where_clause = "" if show_all == "true" else "WHERE t.HSHD_NUM = ?"
     params = None if show_all == "true" else (hshd_num.zfill(4),)
 
@@ -154,8 +153,8 @@ def data_pull():
         h.L, h.AGE_RANGE, h.MARITAL, h.INCOME_RANGE,
         h.HOMEOWNER, h.HSHD_COMPOSITION, h.HH_SIZE, h.CHILDREN
     FROM transactions t
-    JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
-    JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+    LEFT JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
+    LEFT JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
     {where_clause}
     ORDER BY {order}
     OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
@@ -165,7 +164,6 @@ def data_pull():
         count_query = "SELECT SUM(row_count) as cnt FROM sys.dm_db_partition_stats WHERE object_id=OBJECT_ID('transactions') AND index_id < 2"
         total = int(pd.read_sql(count_query, get_engine()).iloc[0]['cnt'] or 0)
     else:
-        # FIX 2: Swapped %s to ? for pyodbc parameterization
         count_query = "SELECT COUNT(*) as cnt FROM transactions WHERE HSHD_NUM = ?"
         total = pd.read_sql(count_query, get_engine(), params=(hshd_num.zfill(4),)).iloc[0]['cnt']
         
@@ -266,14 +264,14 @@ def get_dashboard_data():
             except: pass
 
     SQLS = {
-        "income": "SELECT h.INCOME_RANGE, AVG(CAST(t.SPEND AS FLOAT)) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE ORDER BY avg_spend DESC",
-        "hhsize": "SELECT h.HH_SIZE, AVG(CAST(t.SPEND AS FLOAT)) as avg_spend FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.HH_SIZE NOT IN ('null','') AND h.HH_SIZE IS NOT NULL GROUP BY h.HH_SIZE ORDER BY h.HH_SIZE",
-        "children": "SELECT CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END as children_status, AVG(CAST(t.SPEND AS FLOAT)) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM GROUP BY CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END",
+        "income": "SELECT h.INCOME_RANGE, SUM(CAST(t.SPEND AS FLOAT)) / COUNT(DISTINCT t.BASKET_NUM) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE ORDER BY avg_spend DESC",
+        "hhsize": "SELECT h.HH_SIZE, SUM(CAST(t.SPEND AS FLOAT)) / COUNT(DISTINCT t.BASKET_NUM) as avg_spend FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.HH_SIZE NOT IN ('null','') AND h.HH_SIZE IS NOT NULL GROUP BY h.HH_SIZE ORDER BY h.HH_SIZE",
+        "children": "SELECT CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END as children_status, SUM(CAST(t.SPEND AS FLOAT)) / COUNT(DISTINCT t.BASKET_NUM) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM GROUP BY CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END",
         "region": "SELECT STORE_R, SUM(CAST(SPEND AS FLOAT)) as total_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE STORE_R NOT IN ('null','') AND STORE_R IS NOT NULL GROUP BY STORE_R ORDER BY total_spend DESC",
         "weekly": "SELECT CAST(WEEK_NUM AS INT) as WEEK_NUM, CAST(YEAR AS INT) as YEAR, SUM(CAST(SPEND AS FLOAT)) as spend FROM transactions GROUP BY WEEK_NUM, YEAR ORDER BY YEAR, CAST(WEEK_NUM AS INT)",
         "dept_year": "SELECT p.DEPARTMENT, CAST(t.YEAR AS INT) as YEAR, SUM(CAST(t.SPEND AS FLOAT)) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.YEAR NOT IN ('null','') AND t.YEAR IS NOT NULL GROUP BY p.DEPARTMENT, t.YEAR ORDER BY t.YEAR, total_spend DESC",
         "basket": "WITH top_baskets AS (SELECT TOP 5000 BASKET_NUM FROM transactions GROUP BY BASKET_NUM ORDER BY SUM(CAST(SPEND AS FLOAT)) DESC), basket_comm AS (SELECT DISTINCT t.BASKET_NUM, p.COMMODITY FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN top_baskets b ON t.BASKET_NUM = b.BASKET_NUM WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL) SELECT TOP 10 c1.COMMODITY as item_1, c2.COMMODITY as item_2, COUNT(*) as times_bought_together FROM basket_comm c1 JOIN basket_comm c2 ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY GROUP BY c1.COMMODITY, c2.COMMODITY ORDER BY times_bought_together DESC",
-        "seasonal": "SELECT CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, SUM(CAST(SPEND AS FLOAT)) as total_spend, AVG(CAST(SPEND AS FLOAT)) as avg_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE WEEK_NUM NOT IN ('null','') AND WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END",
+        "seasonal": "SELECT CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, SUM(CAST(SPEND AS FLOAT)) as total_spend, SUM(CAST(SPEND AS FLOAT)) / COUNT(DISTINCT BASKET_NUM) as avg_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE WEEK_NUM NOT IN ('null','') AND WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END",
         "seasonal_commodity": "SELECT TOP 20 CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, p.DEPARTMENT, SUM(CAST(t.SPEND AS FLOAT)) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.WEEK_NUM NOT IN ('null','') AND t.WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END, p.DEPARTMENT ORDER BY season, total_spend DESC",
         "brand": "SELECT p.BRAND_TY, SUM(CAST(t.SPEND AS FLOAT)) as total_spend, COUNT(*) as transaction_count FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL GROUP BY p.BRAND_TY",
         "organic": "SELECT p.NATURAL_ORGANIC_FLAG, SUM(CAST(t.SPEND AS FLOAT)) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as buyers FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.NATURAL_ORGANIC_FLAG NOT IN ('null','') AND p.NATURAL_ORGANIC_FLAG IS NOT NULL GROUP BY p.NATURAL_ORGANIC_FLAG",
