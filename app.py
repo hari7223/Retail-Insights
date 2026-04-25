@@ -4,14 +4,16 @@ import concurrent.futures
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-
-_dashboard_cache  = {}
-_basket_ml_cache  = {}
-_CACHE_TTL = 1800  # 30 minutes
+import joblib
 
 load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
+
+CACHE_DIR = "models"
+DASHBOARD_CACHE_FILE = os.path.join(CACHE_DIR, "dashboard_cache.pkl")
+BASKET_CACHE_FILE = os.path.join(CACHE_DIR, "basket_cache.pkl")
+_CACHE_TTL = 1800  # 30 minutes
 
 _engine = None
 def get_engine():
@@ -23,18 +25,28 @@ def get_engine():
         password = os.getenv('SQL_PASSWORD')
         _engine = create_engine(
             f"mssql+pymssql://{user}:{password}@{server}/{database}",
-            pool_pre_ping=True,
-            pool_recycle=1800,
-            pool_size=12,         
-            max_overflow=6,      
+            pool_pre_ping=True,   # detect & drop stale connections before use
+            pool_recycle=1800,    # recycle every 30 min 
+            pool_size=12,         # support for multiple gunicorn workers
+            max_overflow=6,       
             connect_args={"timeout": 30, "login_timeout": 30}
         )
     return _engine
+
+def login_required(f):
+    from functools import wraps
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if "user" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return wrapper
 
 # ── Background ML training ─────────────────────────────────────────────────────
 _training_status = {"running": False, "done": False, "error": None}
 
 def _start_background_training():
+    """Train ML models in a daemon thread — never blocks a web request."""
     def _train():
         _training_status["running"] = True
         try:
@@ -45,6 +57,7 @@ def _start_background_training():
             train_clv_model(features)
             train_churn_model(features)
             features.to_csv("models/features.csv", index=False)
+            
             try:
                 import ml_models as _mlm
                 _mlm._clv_model = None
@@ -62,92 +75,261 @@ def _start_background_training():
 if not (os.path.exists("models/clv_model.pkl") and os.path.exists("models/churn_model.pkl")):
     _start_background_training()
 
-# ── Background Cache Warming ──────────────────────────────────────────────────
-def _warm_caches_in_background():
-    """Runs dashboard queries in background so users never hit an empty cache"""
-    def _warm():
-        while True:
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+@app.route("/", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        try:
+            with get_engine().connect() as conn:
+                row = conn.execute(
+                    text("SELECT password_hash FROM users WHERE username=:u"),
+                    {"u": username}
+                ).fetchone()
+            if row and check_password_hash(row[0], password):
+                session["user"] = username
+                return redirect(url_for("dashboard"))
+            flash("Invalid credentials.")
+        except Exception as e:
+            flash(f"Login error: {e}")
+    return render_template("login.html")
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        try:
+            with get_engine().connect() as conn:
+                conn.execute(
+                    text("INSERT INTO users (username, password_hash, email) VALUES (:u, :p, :e)"),
+                    {"u": request.form["username"],
+                     "p": generate_password_hash(request.form["password"]),
+                     "e": request.form["email"]}
+                )
+                conn.commit()
+            flash("Registered. Please log in.")
+            return redirect(url_for("login"))
+        except Exception as e:
+            flash(f"Registration failed: {e}")
+    return render_template("register.html")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+# ── Data Pull ─────────────────────────────────────────────────────────────────
+
+@app.route("/data-pull", methods=["GET", "POST"])
+@login_required
+def data_pull():
+    hshd_num = request.form.get("hshd_num", "10")
+    show_all = request.form.get("show_all", "false")
+    sort_col = request.form.get("sort", "HSHD_NUM")
+    sort_dir = request.form.get("sort_dir", "asc")
+    page = int(request.form.get("page", 1))
+    page_size = 100
+    offset = (page - 1) * page_size
+    next_dir = "desc" if sort_dir == "asc" else "asc"
+
+    valid_cols = ["HSHD_NUM", "BASKET_NUM", "PURCHASE_DATE", "PRODUCT_NUM",
+                  "DEPARTMENT", "COMMODITY", "SPEND", "UNITS"]
+    if sort_col not in valid_cols:
+        sort_col = "HSHD_NUM"
+
+    order = f"{sort_col} {'DESC' if sort_dir == 'desc' else 'ASC'}"
+    where_clause = "" if show_all == "true" else "WHERE t.HSHD_NUM = %s"
+    params = None if show_all == "true" else (hshd_num.zfill(4),)
+
+    df = pd.read_sql(f"""
+    SELECT
+        h.HSHD_NUM, t.BASKET_NUM, t.PURCHASE_DATE, t.PRODUCT_NUM,
+        p.DEPARTMENT, p.COMMODITY, t.SPEND, t.UNITS,
+        t.STORE_R, t.WEEK_NUM, t.YEAR,
+        h.L, h.AGE_RANGE, h.MARITAL, h.INCOME_RANGE,
+        h.HOMEOWNER, h.HSHD_COMPOSITION, h.HH_SIZE, h.CHILDREN
+    FROM transactions t
+    JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
+    JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+    {where_clause}
+    ORDER BY {order}
+    OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
+    """, get_engine(), params=params)
+
+    # Fast row count for 3.6 million rows
+    if show_all == "true":
+        count_query = "SELECT SUM(row_count) as cnt FROM sys.dm_db_partition_stats WHERE object_id=OBJECT_ID('transactions') AND index_id < 2"
+        total = int(pd.read_sql(count_query, get_engine()).iloc[0]['cnt'] or 0)
+    else:
+        count_query = "SELECT COUNT(*) as cnt FROM transactions WHERE HSHD_NUM = %s"
+        total = pd.read_sql(count_query, get_engine(), params=(hshd_num.zfill(4),)).iloc[0]['cnt']
+        
+    total_pages = max(1, -(-total // page_size))
+
+    return render_template("data_pull.html",
+                           rows=df.to_dict("records"), columns=df.columns.tolist(),
+                           hshd_num=hshd_num, show_all=show_all, sort_col=sort_col,
+                           sort_dir=sort_dir, next_dir=next_dir, page=page,
+                           total_pages=total_pages, total=total)
+
+# ── Upload ────────────────────────────────────────────────────────────────────
+
+@app.route("/upload", methods=["GET", "POST"])
+@login_required
+def upload():
+    if request.method == "POST":
+        import tempfile
+        PKS = {
+            "households":   ["HSHD_NUM"],
+            "products":     ["PRODUCT_NUM"],
+            "transactions": ["BASKET_NUM", "PRODUCT_NUM"],
+        }
+        files = {}
+        for key in ["households", "transactions", "products"]:
+            f = request.files.get(key)
+            if f:
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+                f.save(tmp.name)
+                files[key] = tmp.name
+
+        if len(files) == 3:
             try:
-                # Refresh basket ML
-                compute_basket_ml()
-                
-                # Refresh Dashboard 
-                SQLS = {
-                    "income": "SELECT h.INCOME_RANGE, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE ORDER BY avg_spend DESC",
-                    "hhsize": "SELECT h.HH_SIZE, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.HH_SIZE NOT IN ('null','') AND h.HH_SIZE IS NOT NULL GROUP BY h.HH_SIZE ORDER BY h.HH_SIZE",
-                    "children": "SELECT CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END as children_status, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM GROUP BY CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END",
-                    "region": "SELECT STORE_R, SUM(CAST(SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE STORE_R NOT IN ('null','') AND STORE_R IS NOT NULL GROUP BY STORE_R ORDER BY total_spend DESC",
-                    "weekly": "SELECT CAST(WEEK_NUM AS INT) as WEEK_NUM, CAST(YEAR AS INT) as YEAR, SUM(CAST(SPEND AS DECIMAL(10,2))) as spend FROM transactions GROUP BY WEEK_NUM, YEAR ORDER BY YEAR, CAST(WEEK_NUM AS INT)",
-                    "dept_year": "SELECT p.DEPARTMENT, CAST(t.YEAR AS INT) as YEAR, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.YEAR NOT IN ('null','') AND t.YEAR IS NOT NULL GROUP BY p.DEPARTMENT, t.YEAR ORDER BY t.YEAR, total_spend DESC",
-                    "basket": "WITH top_baskets AS (SELECT DISTINCT TOP 5000 BASKET_NUM FROM transactions), basket_comm AS (SELECT DISTINCT t.BASKET_NUM, p.COMMODITY FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN top_baskets b ON t.BASKET_NUM = b.BASKET_NUM WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL) SELECT TOP 10 c1.COMMODITY as item_1, c2.COMMODITY as item_2, COUNT(*) as times_bought_together FROM basket_comm c1 JOIN basket_comm c2 ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY GROUP BY c1.COMMODITY, c2.COMMODITY ORDER BY times_bought_together DESC",
-                    "seasonal": "SELECT CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, SUM(CAST(SPEND AS DECIMAL(10,2))) as total_spend, AVG(CAST(SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE WEEK_NUM NOT IN ('null','') AND WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END",
-                    "seasonal_commodity": "SELECT TOP 20 CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, p.DEPARTMENT, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.WEEK_NUM NOT IN ('null','') AND t.WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END, p.DEPARTMENT ORDER BY season, total_spend DESC",
-                    "brand": "SELECT p.BRAND_TY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(*) as transaction_count FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL GROUP BY p.BRAND_TY",
-                    "organic": "SELECT p.NATURAL_ORGANIC_FLAG, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as buyers FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.NATURAL_ORGANIC_FLAG NOT IN ('null','') AND p.NATURAL_ORGANIC_FLAG IS NOT NULL GROUP BY p.NATURAL_ORGANIC_FLAG",
-                    "brand_income": "SELECT h.INCOME_RANGE, p.BRAND_TY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL AND h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE, p.BRAND_TY ORDER BY h.INCOME_RANGE, p.BRAND_TY",
-                    "dept": "SELECT p.DEPARTMENT, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as unique_households FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM GROUP BY p.DEPARTMENT ORDER BY total_spend DESC",
-                    "commodity": "SELECT TOP 10 p.COMMODITY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM GROUP BY p.COMMODITY ORDER BY total_spend DESC"
-                }
-                
-                results = {}
-                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-                    def _q(sql):
-                        with get_engine().connect() as c:
-                            return pd.read_sql(sql, c)
-                    fmap = {ex.submit(_q, sql): name for name, sql in SQLS.items()}
-                    for fut in concurrent.futures.as_completed(fmap):
-                        results[fmap[fut]] = fut.result()
+                engine = get_engine()
+                summary = []
+                for table, path in [("households", files["households"]), ("products", files["products"]), ("transactions", files["transactions"])]:
+                    df = pd.read_csv(path)
+                    df.columns = df.columns.str.strip()
+                    df = df.astype(str).replace('nan', None)
 
-                top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
-                try:
-                    from ml_models import get_all_predictions
-                    preds = get_all_predictions()
-                    top_clv = preds.nlargest(10, 'clv_score')[
-                        ['HSHD_NUM','clv_score','churn_prob','risk_segment','frequency','recency']
-                    ].to_dict("records")
-                    churn_counts    = preds['risk_segment'].value_counts().to_dict()
-                    avg_clv         = round(preds['clv_score'].mean(), 2)
-                    high_risk_count = int((preds['risk_segment'] == 'High Risk').sum())
-                except Exception:
-                    pass
+                    pk_cols = PKS[table]
+                    staging = f"_stage_{table}"
+                    cols     = ", ".join(f"s.[{c}]" for c in df.columns)
+                    pk_join  = " AND ".join(f"m.[{c}] = s.[{c}]" for c in pk_cols)
 
-                _dashboard_cache["data"] = {
-                    "ts": time.time(),
-                    "income": results.get("income", pd.DataFrame()), 
-                    "hhsize": results.get("hhsize", pd.DataFrame()), 
-                    "children": results.get("children", pd.DataFrame()),
-                    "region": results.get("region", pd.DataFrame()), 
-                    "weekly": results.get("weekly", pd.DataFrame()), 
-                    "dept_year": results.get("dept_year", pd.DataFrame()),
-                    "basket": results.get("basket", pd.DataFrame()), 
-                    "seasonal": results.get("seasonal", pd.DataFrame()),
-                    "seasonal_commodity": results.get("seasonal_commodity", pd.DataFrame()), 
-                    "brand": results.get("brand", pd.DataFrame()),
-                    "organic": results.get("organic", pd.DataFrame()), 
-                    "brand_income": results.get("brand_income", pd.DataFrame()),
-                    "dept": results.get("dept", pd.DataFrame()), 
-                    "commodity": results.get("commodity", pd.DataFrame()),
-                    "top_clv": top_clv, "churn_counts": churn_counts,
-                    "avg_clv": avg_clv, "high_risk_count": high_risk_count,
-                }
+                    df.to_sql(staging, engine, if_exists="replace", index=False, chunksize=500)
+                    with engine.connect() as conn:
+                        result = conn.execute(text(f"""
+                            INSERT INTO [{table}] ({', '.join(f'[{c}]' for c in df.columns)})
+                            SELECT {cols} FROM [{staging}] s
+                            WHERE NOT EXISTS (SELECT 1 FROM [{table}] m WHERE {pk_join})
+                        """))
+                        inserted = result.rowcount
+                        conn.execute(text(f"DROP TABLE [{staging}]"))
+                        conn.commit()
+                    summary.append(f"{table}: {inserted} new, {len(df) - inserted} skipped")
+
+                # Clear file caches to reflect new data
+                if os.path.exists(DASHBOARD_CACHE_FILE): os.remove(DASHBOARD_CACHE_FILE)
+                if os.path.exists(BASKET_CACHE_FILE): os.remove(BASKET_CACHE_FILE)
+                
+                flash("Upload complete — " + " | ".join(summary))
             except Exception as e:
-                print(f"Background warming failed: {e}")
-            
-            # Sleep for 25 mins so cache refreshes before 30 min TTL
-            time.sleep(1500) 
+                flash(f"Upload failed: {e}")
+            finally:
+                for p in files.values():
+                    os.unlink(p)
+        else:
+            flash("Please upload all three files.")
+    return render_template("upload.html")
 
-    threading.Thread(target=_warm, daemon=True).start()
+# ── Dashboard Logic ───────────────────────────────────────────────────────────
 
-_warm_caches_in_background()
+def get_dashboard_data():
+    """Fetches dashboard data. Uses a file cache to share data across all 4 Gunicorn workers."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    
+    # Check if cache exists and is fresh
+    if os.path.exists(DASHBOARD_CACHE_FILE):
+        file_age = time.time() - os.path.getmtime(DASHBOARD_CACHE_FILE)
+        if file_age < _CACHE_TTL:
+            try: return joblib.load(DASHBOARD_CACHE_FILE)
+            except: pass
+
+    SQLS = {
+        "income": "SELECT h.INCOME_RANGE, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE ORDER BY avg_spend DESC",
+        "hhsize": "SELECT h.HH_SIZE, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.HH_SIZE NOT IN ('null','') AND h.HH_SIZE IS NOT NULL GROUP BY h.HH_SIZE ORDER BY h.HH_SIZE",
+        "children": "SELECT CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END as children_status, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM GROUP BY CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END",
+        "region": "SELECT STORE_R, SUM(CAST(SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE STORE_R NOT IN ('null','') AND STORE_R IS NOT NULL GROUP BY STORE_R ORDER BY total_spend DESC",
+        "weekly": "SELECT CAST(WEEK_NUM AS INT) as WEEK_NUM, CAST(YEAR AS INT) as YEAR, SUM(CAST(SPEND AS DECIMAL(10,2))) as spend FROM transactions GROUP BY WEEK_NUM, YEAR ORDER BY YEAR, CAST(WEEK_NUM AS INT)",
+        "dept_year": "SELECT p.DEPARTMENT, CAST(t.YEAR AS INT) as YEAR, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.YEAR NOT IN ('null','') AND t.YEAR IS NOT NULL GROUP BY p.DEPARTMENT, t.YEAR ORDER BY t.YEAR, total_spend DESC",
+        "basket": "WITH top_baskets AS (SELECT TOP 5000 BASKET_NUM FROM transactions GROUP BY BASKET_NUM ORDER BY SUM(CAST(SPEND AS DECIMAL(10,2))) DESC), basket_comm AS (SELECT DISTINCT t.BASKET_NUM, p.COMMODITY FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN top_baskets b ON t.BASKET_NUM = b.BASKET_NUM WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL) SELECT TOP 10 c1.COMMODITY as item_1, c2.COMMODITY as item_2, COUNT(*) as times_bought_together FROM basket_comm c1 JOIN basket_comm c2 ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY GROUP BY c1.COMMODITY, c2.COMMODITY ORDER BY times_bought_together DESC",
+        "seasonal": "SELECT CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, SUM(CAST(SPEND AS DECIMAL(10,2))) as total_spend, AVG(CAST(SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE WEEK_NUM NOT IN ('null','') AND WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END",
+        "seasonal_commodity": "SELECT TOP 20 CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, p.DEPARTMENT, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.WEEK_NUM NOT IN ('null','') AND t.WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END, p.DEPARTMENT ORDER BY season, total_spend DESC",
+        "brand": "SELECT p.BRAND_TY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(*) as transaction_count FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL GROUP BY p.BRAND_TY",
+        "organic": "SELECT p.NATURAL_ORGANIC_FLAG, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as buyers FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.NATURAL_ORGANIC_FLAG NOT IN ('null','') AND p.NATURAL_ORGANIC_FLAG IS NOT NULL GROUP BY p.NATURAL_ORGANIC_FLAG",
+        "brand_income": "SELECT h.INCOME_RANGE, p.BRAND_TY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL AND h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE, p.BRAND_TY ORDER BY h.INCOME_RANGE, p.BRAND_TY",
+        "dept": "SELECT p.DEPARTMENT, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as unique_households FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM GROUP BY p.DEPARTMENT ORDER BY total_spend DESC",
+        "commodity": "SELECT TOP 10 p.COMMODITY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM GROUP BY p.COMMODITY ORDER BY total_spend DESC"
+    }
+
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        def _q(sql):
+            with get_engine().connect() as c:
+                return pd.read_sql(sql, c)
+        fmap = {ex.submit(_q, sql): name for name, sql in SQLS.items()}
+        for fut in concurrent.futures.as_completed(fmap):
+            results[fmap[fut]] = fut.result()
+
+    top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
+    try:
+        from ml_models import get_all_predictions
+        preds = get_all_predictions()
+        top_clv = preds.nlargest(10, 'clv_score')[
+            ['HSHD_NUM','clv_score','churn_prob','risk_segment','frequency','recency']
+        ].to_dict("records")
+        churn_counts    = preds['risk_segment'].value_counts().to_dict()
+        avg_clv         = round(preds['clv_score'].mean(), 2)
+        high_risk_count = int((preds['risk_segment'] == 'High Risk').sum())
+    except Exception as e:
+        print(f"ML data not ready for dashboard: {e}")
+
+    cache_data = {
+        "income": results.get("income", pd.DataFrame()), "hhsize": results.get("hhsize", pd.DataFrame()), 
+        "children": results.get("children", pd.DataFrame()), "region": results.get("region", pd.DataFrame()), 
+        "weekly": results.get("weekly", pd.DataFrame()), "dept_year": results.get("dept_year", pd.DataFrame()),
+        "basket": results.get("basket", pd.DataFrame()), "seasonal": results.get("seasonal", pd.DataFrame()),
+        "seasonal_commodity": results.get("seasonal_commodity", pd.DataFrame()), "brand": results.get("brand", pd.DataFrame()),
+        "organic": results.get("organic", pd.DataFrame()), "brand_income": results.get("brand_income", pd.DataFrame()),
+        "dept": results.get("dept", pd.DataFrame()), "commodity": results.get("commodity", pd.DataFrame()),
+        "top_clv": top_clv, "churn_counts": churn_counts, "avg_clv": avg_clv, "high_risk_count": high_risk_count,
+    }
+
+    joblib.dump(cache_data, DASHBOARD_CACHE_FILE)
+    return cache_data
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    cached = get_dashboard_data()
+    return render_template("dashboard.html",
+        dept=cached["dept"].to_dict("records"), weekly=cached["weekly"].to_dict("records"),
+        income=cached["income"].to_dict("records"), brand=cached["brand"].to_dict("records"),
+        organic=cached["organic"].to_dict("records"), commodity=cached["commodity"].to_dict("records"),
+        hhsize=cached["hhsize"].to_dict("records"), children=cached["children"].to_dict("records"),
+        region=cached["region"].to_dict("records"), dept_year=cached["dept_year"].to_dict("records"),
+        basket=cached["basket"].to_dict("records"), seasonal=cached["seasonal"].to_dict("records"),
+        seasonal_commodity=cached["seasonal_commodity"].to_dict("records"), brand_income=cached["brand_income"].to_dict("records"),
+        top_clv=cached["top_clv"], churn_counts=cached["churn_counts"], avg_clv=cached["avg_clv"], high_risk_count=cached["high_risk_count"]
+    )
+
+# ── ML Results & Basket Analysis ──────────────────────────────────────────────
 
 def compute_basket_ml():
+    """Train a Gradient Boosting Regressor on commodity-pair co-purchase data."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    
+    # Check file cache for other workers
+    if os.path.exists(BASKET_CACHE_FILE):
+        file_age = time.time() - os.path.getmtime(BASKET_CACHE_FILE)
+        if file_age < _CACHE_TTL:
+            try: return joblib.load(BASKET_CACHE_FILE)
+            except: pass
+
     from sklearn.ensemble import GradientBoostingRegressor
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import r2_score, mean_absolute_error
-
-    cached = _basket_ml_cache.get("data")
-    if cached and (time.time() - cached["ts"]) < _CACHE_TTL:
-        return cached["result"]
 
     engine = get_engine()
     with engine.connect() as conn:
@@ -206,7 +388,6 @@ def compute_basket_ml():
 
     r2  = round(float(r2_score(y_test, model.predict(X_test))), 3)
     mae = round(float(mean_absolute_error(y_test, model.predict(X_test))), 1)
-
     pairs['predicted'] = model.predict(X).round(1)
 
     importances = sorted([{'feature': lbl, 'importance': round(float(v), 4)} for lbl, v in zip(feature_labels, model.feature_importances_)], key=lambda x: -x['importance'])
@@ -215,156 +396,9 @@ def compute_basket_ml():
         'pairs': pairs[['item_1', 'item_2', 'times_bought_together', 'predicted']].head(20).to_dict('records'),
         'importances': importances, 'r2': r2, 'mae': mae, 'n_pairs': len(pairs),
     }
-    _basket_ml_cache["data"] = {"ts": time.time(), "result": result}
-    return result
-
-def login_required(f):
-    from functools import wraps
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if "user" not in session:
-            return redirect(url_for("login"))
-        return f(*args, **kwargs)
-    return wrapper
-
-@app.route("/", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        username = request.form["username"]
-        password = request.form["password"]
-        try:
-            with get_engine().connect() as conn:
-                row = conn.execute(text("SELECT password_hash FROM users WHERE username=:u"), {"u": username}).fetchone()
-            if row and check_password_hash(row[0], password):
-                session["user"] = username
-                return redirect(url_for("dashboard"))
-            flash("Invalid credentials.")
-        except Exception as e:
-            flash(f"Login error: {e}")
-    return render_template("login.html")
-
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    if request.method == "POST":
-        try:
-            with get_engine().connect() as conn:
-                conn.execute(text("INSERT INTO users (username, password_hash, email) VALUES (:u, :p, :e)"), {"u": request.form["username"], "p": generate_password_hash(request.form["password"]), "e": request.form["email"]})
-                conn.commit()
-            flash("Registered. Please log in.")
-            return redirect(url_for("login"))
-        except Exception as e:
-            flash(f"Registration failed: {e}")
-    return render_template("register.html")
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-@app.route("/data-pull", methods=["GET", "POST"])
-@login_required
-def data_pull():
-    hshd_num = request.form.get("hshd_num", "10")
-    show_all = request.form.get("show_all", "false")
-    sort_col = request.form.get("sort", "HSHD_NUM")
-    sort_dir = request.form.get("sort_dir", "asc")
-    page = int(request.form.get("page", 1))
-    page_size = 100
-    offset = (page - 1) * page_size
-    next_dir = "desc" if sort_dir == "asc" else "asc"
-
-    valid_cols = ["HSHD_NUM", "BASKET_NUM", "PURCHASE_DATE", "PRODUCT_NUM", "DEPARTMENT", "COMMODITY", "SPEND", "UNITS"]
-    if sort_col not in valid_cols:
-        sort_col = "HSHD_NUM"
-
-    order = f"{sort_col} {'DESC' if sort_dir == 'desc' else 'ASC'}"
-    where_clause = "" if show_all == "true" else "WHERE t.HSHD_NUM = %s"
-    params = None if show_all == "true" else (hshd_num.zfill(4),)
-
-    df = pd.read_sql(f"""
-        SELECT h.HSHD_NUM, t.BASKET_NUM, t.PURCHASE_DATE, t.PRODUCT_NUM, p.DEPARTMENT, p.COMMODITY, t.SPEND, t.UNITS, t.STORE_R, t.WEEK_NUM, t.YEAR, h.L, h.AGE_RANGE, h.MARITAL, h.INCOME_RANGE, h.HOMEOWNER, h.HSHD_COMPOSITION, h.HH_SIZE, h.CHILDREN
-        FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
-        {where_clause} ORDER BY {order} OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
-    """, get_engine(), params=params)
-
-    # OPTIMIZATION: Instant row count for SQL Server using DMVs instead of scanning the whole table
-    if show_all == "true":
-        count_query = "SELECT SUM(row_count) as cnt FROM sys.dm_db_partition_stats WHERE object_id=OBJECT_ID('transactions') AND index_id < 2"
-        total = int(pd.read_sql(count_query, get_engine()).iloc[0]['cnt'] or 0)
-    else:
-        count_query = "SELECT COUNT(*) as cnt FROM transactions WHERE HSHD_NUM = %s"
-        total = pd.read_sql(count_query, get_engine(), params=(hshd_num.zfill(4),)).iloc[0]['cnt']
-        
-    total_pages = max(1, -(-total // page_size))
-
-    return render_template("data_pull.html", rows=df.to_dict("records"), columns=df.columns.tolist(), hshd_num=hshd_num, show_all=show_all, sort_col=sort_col, sort_dir=sort_dir, next_dir=next_dir, page=page, total_pages=total_pages, total=total)
-
-@app.route("/upload", methods=["GET", "POST"])
-@login_required
-def upload():
-    if request.method == "POST":
-        import tempfile
-        PKS = {"households": ["HSHD_NUM"], "products": ["PRODUCT_NUM"], "transactions": ["BASKET_NUM", "PRODUCT_NUM"]}
-        files = {}
-        for key in ["households", "transactions", "products"]:
-            f = request.files.get(key)
-            if f:
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
-                f.save(tmp.name)
-                files[key] = tmp.name
-
-        if len(files) == 3:
-            try:
-                engine = get_engine()
-                summary = []
-                for table, path in [("households", files["households"]), ("products", files["products"]), ("transactions", files["transactions"])]:
-                    df = pd.read_csv(path)
-                    df.columns = df.columns.str.strip()
-                    df = df.astype(str).replace('nan', None)
-
-                    pk_cols = PKS[table]
-                    staging = f"_stage_{table}"
-                    cols     = ", ".join(f"s.[{c}]" for c in df.columns)
-                    pk_join  = " AND ".join(f"m.[{c}] = s.[{c}]" for c in pk_cols)
-
-                    df.to_sql(staging, engine, if_exists="replace", index=False, chunksize=500)
-                    with engine.connect() as conn:
-                        result = conn.execute(text(f"INSERT INTO [{table}] ({', '.join(f'[{c}]' for c in df.columns)}) SELECT {cols} FROM [{staging}] s WHERE NOT EXISTS (SELECT 1 FROM [{table}] m WHERE {pk_join})"))
-                        inserted = result.rowcount
-                        conn.execute(text(f"DROP TABLE [{staging}]"))
-                        conn.commit()
-                    summary.append(f"{table}: {inserted} new, {len(df) - inserted} skipped")
-
-                # Re-trigger background cache immediately instead of making the next user wait
-                threading.Thread(target=_warm_caches_in_background, daemon=True).start()
-                flash("Upload complete — " + " | ".join(summary))
-            except Exception as e:
-                flash(f"Upload failed: {e}")
-            finally:
-                for p in files.values():
-                    os.unlink(p)
-        else:
-            flash("Please upload all three files.")
-    return render_template("upload.html")
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    cached = _dashboard_cache.get("data")
-    if not cached:
-        flash("Dashboard is currently warming up in the background. Partial or empty data may be shown. Please refresh in a moment.")
-        return render_template("dashboard.html", dept=[], weekly=[], income=[], brand=[], organic=[], commodity=[], hhsize=[], children=[], region=[], dept_year=[], basket=[], seasonal=[], seasonal_commodity=[], brand_income=[], top_clv=[], churn_counts={}, avg_clv=0, high_risk_count=0)
     
-    return render_template("dashboard.html",
-        dept=cached["dept"].to_dict("records"), weekly=cached["weekly"].to_dict("records"),
-        income=cached["income"].to_dict("records"), brand=cached["brand"].to_dict("records"),
-        organic=cached["organic"].to_dict("records"), commodity=cached["commodity"].to_dict("records"),
-        hhsize=cached["hhsize"].to_dict("records"), children=cached["children"].to_dict("records"),
-        region=cached["region"].to_dict("records"), dept_year=cached["dept_year"].to_dict("records"),
-        basket=cached["basket"].to_dict("records"), seasonal=cached["seasonal"].to_dict("records"),
-        seasonal_commodity=cached["seasonal_commodity"].to_dict("records"), brand_income=cached["brand_income"].to_dict("records"),
-        top_clv=cached["top_clv"], churn_counts=cached["churn_counts"], avg_clv=cached["avg_clv"], high_risk_count=cached["high_risk_count"]
-    )
+    joblib.dump(result, BASKET_CACHE_FILE)
+    return result
 
 @app.route("/ml")
 @login_required
@@ -392,7 +426,11 @@ def ml_results():
     except Exception as e:
         flash(f"ML model error: {e}")
 
-    basket_ml = compute_basket_ml() if _basket_ml_cache.get("data") else None
+    basket_ml = None
+    try:
+        basket_ml = compute_basket_ml()
+    except Exception as e:
+        flash(f"Basket ML error: {e}")
 
     return render_template("ml.html", predictions=all_preds, stats=stats, churn_importances=churn_importances, churn_correlations=churn_correlations, basket_ml=basket_ml)
 
