@@ -37,32 +37,28 @@ def get_engine():
         )
 
 def load_data():
-    # We only need the household demographics directly
     with get_engine().connect() as conn:
         hh = pd.read_sql("SELECT * FROM households", conn)
         
-        # SQL PUSHDOWN: Instead of downloading 3.6M rows, we let SQL Server 
-        # calculate the RFM metrics and return just ~5,000 household rows.
+        # SQL PUSHDOWN: Using CROSS JOIN to avoid subqueries inside the SUM() aggregation
         rfm_query = """
         WITH max_date AS (
             SELECT MAX(CAST(PURCHASE_DATE AS DATE)) as snap_date FROM transactions
-        ),
-        agg AS (
-            SELECT 
-                t.HSHD_NUM,
-                MAX(CAST(t.PURCHASE_DATE AS DATE)) as last_purchase,
-                COUNT(DISTINCT t.BASKET_NUM) as frequency,
-                SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend,
-                SUM(CAST(t.UNITS AS INT)) as total_units,
-                SUM(CASE WHEN CAST(t.PURCHASE_DATE AS DATE) >= DATEADD(month, -6, (SELECT snap_date FROM max_date)) 
-                         THEN CAST(t.SPEND AS DECIMAL(10,2)) ELSE 0 END) as recent_spend,
-                SUM(CASE WHEN CAST(t.PURCHASE_DATE AS DATE) < DATEADD(month, -6, (SELECT snap_date FROM max_date)) 
-                         THEN CAST(t.SPEND AS DECIMAL(10,2)) ELSE 0 END) as older_spend,
-                (SELECT snap_date FROM max_date) as snapshot_date
-            FROM transactions t
-            GROUP BY t.HSHD_NUM
         )
-        SELECT * FROM agg
+        SELECT 
+            t.HSHD_NUM,
+            MAX(CAST(t.PURCHASE_DATE AS DATE)) as last_purchase,
+            COUNT(DISTINCT t.BASKET_NUM) as frequency,
+            SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend,
+            SUM(CAST(t.UNITS AS INT)) as total_units,
+            SUM(CASE WHEN CAST(t.PURCHASE_DATE AS DATE) >= DATEADD(month, -6, md.snap_date) 
+                     THEN CAST(t.SPEND AS DECIMAL(10,2)) ELSE 0 END) as recent_spend,
+            SUM(CASE WHEN CAST(t.PURCHASE_DATE AS DATE) < DATEADD(month, -6, md.snap_date) 
+                     THEN CAST(t.SPEND AS DECIMAL(10,2)) ELSE 0 END) as older_spend,
+            md.snap_date as snapshot_date
+        FROM transactions t
+        CROSS JOIN max_date md
+        GROUP BY t.HSHD_NUM, md.snap_date
         """
         rfm = pd.read_sql(rfm_query, conn)
 
