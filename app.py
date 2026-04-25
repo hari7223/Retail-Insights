@@ -25,11 +25,14 @@ def get_engine():
         password = os.getenv('SQL_PASSWORD')
         _engine = create_engine(
             f"mssql+pymssql://{user}:{password}@{server}/{database}",
-            pool_pre_ping=True,   # detect & drop stale connections before use
-            pool_recycle=1800,    # recycle every 30 min 
-            pool_size=12,         # support for multiple gunicorn workers
-            max_overflow=6,       
-            connect_args={"timeout": 30, "login_timeout": 30}
+            pool_pre_ping=True,
+            pool_recycle=1800,    
+            pool_size=5,          # Reduced from 12 to prevent connection limits
+            max_overflow=5,       
+            connect_args={
+                "timeout": 120,       
+                "login_timeout": 30
+            }
         )
     return _engine
 
@@ -264,7 +267,7 @@ def get_dashboard_data():
     }
 
     results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         def _q(sql):
             with get_engine().connect() as c:
                 return pd.read_sql(sql, c)
