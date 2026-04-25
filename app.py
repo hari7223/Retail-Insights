@@ -304,6 +304,7 @@ def warm_cache():
     """Hidden endpoint for a cron job to keep the dashboard cache fresh."""
     try:
         get_dashboard_data()
+        compute_basket_ml()
         return {"status": "success", "message": "Cache warmed."}, 200
     except Exception as e:
         return {"status": "error", "message": str(e)}, 500
