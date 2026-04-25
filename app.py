@@ -52,12 +52,12 @@ def login_required(f):
     return wrapper
 
 # ── Background ML training ─────────────────────────────────────────────────────
-_training_status = {"running": False, "done": False, "error": None}
-
-def _start_background_training():
-    """Train ML models in a daemon thread — never blocks a web request."""
-    def _train():
-        _training_status["running"] = True
+# ── Synchronous ML Training ───────────────────────────────────────────────────
+def ensure_ml_models():
+    """Trains ML models synchronously before the server handles any requests."""
+    import os
+    if not (os.path.exists("models/clv_model.pkl") and os.path.exists("models/churn_model.pkl")):
+        print("Training ML models synchronously on startup...")
         try:
             os.makedirs("models", exist_ok=True)
             from train_models import load_data, build_features, train_clv_model, train_churn_model
@@ -66,23 +66,12 @@ def _start_background_training():
             train_clv_model(features)
             train_churn_model(features)
             features.to_csv("models/features.csv", index=False)
-            
-            try:
-                import ml_models as _mlm
-                _mlm._clv_model = None
-                _mlm._churn_model = None
-            except Exception:
-                pass
-            _training_status["done"] = True
-        except Exception as exc:
-            _training_status["error"] = str(exc)
-        finally:
-            _training_status["running"] = False
+            print("Startup training complete!")
+        except Exception as e:
+            print(f"Startup training failed: {e}")
 
-    threading.Thread(target=_train, daemon=True).start()
-
-if not (os.path.exists("models/clv_model.pkl") and os.path.exists("models/churn_model.pkl")):
-    _start_background_training()
+# Run immediately on boot
+ensure_ml_models()
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -148,7 +137,9 @@ def data_pull():
         sort_col = "HSHD_NUM"
 
     order = f"{sort_col} {'DESC' if sort_dir == 'desc' else 'ASC'}"
-    where_clause = "" if show_all == "true" else "WHERE t.HSHD_NUM = %s"
+    
+    # FIX 1: Swapped %s to ? for pyodbc parameterization
+    where_clause = "" if show_all == "true" else "WHERE t.HSHD_NUM = ?"
     params = None if show_all == "true" else (hshd_num.zfill(4),)
 
     df = pd.read_sql(f"""
@@ -166,12 +157,12 @@ def data_pull():
     OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
     """, get_engine(), params=params)
 
-    # Fast row count for 3.6 million rows
     if show_all == "true":
         count_query = "SELECT SUM(row_count) as cnt FROM sys.dm_db_partition_stats WHERE object_id=OBJECT_ID('transactions') AND index_id < 2"
         total = int(pd.read_sql(count_query, get_engine()).iloc[0]['cnt'] or 0)
     else:
-        count_query = "SELECT COUNT(*) as cnt FROM transactions WHERE HSHD_NUM = %s"
+        # FIX 2: Swapped %s to ? for pyodbc parameterization
+        count_query = "SELECT COUNT(*) as cnt FROM transactions WHERE HSHD_NUM = ?"
         total = pd.read_sql(count_query, get_engine(), params=(hshd_num.zfill(4),)).iloc[0]['cnt']
         
     total_pages = max(1, -(-total // page_size))
@@ -412,23 +403,18 @@ def compute_basket_ml():
 @app.route("/ml")
 @login_required
 def ml_results():
-    if _training_status["running"]:
-        flash("⏳ ML models are being trained in the background (1–2 min). Refresh in a moment.")
-        return render_template("ml.html", predictions=[], stats={}, churn_importances=[], churn_correlations=[], basket_ml=None)
-    if _training_status["error"]:
-        flash(f"Training error: {_training_status['error']} — retrying now.")
-        _start_background_training()
-        return render_template("ml.html", predictions=[], stats={}, churn_importances=[], churn_correlations=[], basket_ml=None)
-
     all_preds, stats, churn_importances, churn_correlations = [], {}, [], []
     try:
         from ml_models import get_all_predictions, get_churn_importances, get_churn_correlations
         preds = get_all_predictions()
         all_preds = preds.sort_values('churn_prob', ascending=False).to_dict("records")
         stats = {
-            "total": len(preds), "high_risk": int((preds['risk_segment'] == 'High Risk').sum()),
-            "medium_risk": int((preds['risk_segment'] == 'Medium Risk').sum()), "low_risk": int((preds['risk_segment'] == 'Low Risk').sum()),
-            "avg_clv": round(preds['clv_score'].mean(), 2), "max_clv": round(preds['clv_score'].max(), 2),
+            "total":       len(preds),
+            "high_risk":   int((preds['risk_segment'] == 'High Risk').sum()),
+            "medium_risk": int((preds['risk_segment'] == 'Medium Risk').sum()),
+            "low_risk":    int((preds['risk_segment'] == 'Low Risk').sum()),
+            "avg_clv":     round(preds['clv_score'].mean(), 2),
+            "max_clv":     round(preds['clv_score'].max(), 2),
         }
         churn_importances  = get_churn_importances()
         churn_correlations = get_churn_correlations()
@@ -441,7 +427,12 @@ def ml_results():
     except Exception as e:
         flash(f"Basket ML error: {e}")
 
-    return render_template("ml.html", predictions=all_preds, stats=stats, churn_importances=churn_importances, churn_correlations=churn_correlations, basket_ml=basket_ml)
-
+    return render_template("ml.html",
+        predictions=all_preds,
+        stats=stats,
+        churn_importances=churn_importances,
+        churn_correlations=churn_correlations,
+        basket_ml=basket_ml,
+    )
 if __name__ == "__main__":
     app.run(debug=True)

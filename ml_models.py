@@ -36,14 +36,13 @@ def _load_features():
     return features.drop_duplicates(subset=['HSHD_NUM']).reset_index(drop=True)
 
 def get_all_predictions():
-    if not _load_models():
-        raise Exception("Models are currently training in the background. Please try again shortly.")
+    _load_models()
     features = _load_features()
     features['clv_score']    = _clv_model.predict(features[FEATURE_COLS_CLV])
     features['churn_prob']   = _churn_model.predict_proba(features[FEATURE_COLS_CHURN])[:, 1]
     features['risk_segment'] = pd.cut(
         features['churn_prob'],
-        bins=[0, 0.3, 0.6, 1.0],
+        bins=[-0.1, 0.3, 0.6, 1.0],  # Changed 0 to -0.1 here
         labels=['Low Risk', 'Medium Risk', 'High Risk']
     )
     return features[['HSHD_NUM', 'clv_score', 'churn_prob', 'risk_segment',
