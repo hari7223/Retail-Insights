@@ -23,15 +23,21 @@ def get_engine():
         database = os.getenv('SQL_DATABASE')
         user     = os.getenv('SQL_USER')
         password = os.getenv('SQL_PASSWORD')
+        
+        # Swapped pymssql for pyodbc and specified the Microsoft ODBC Driver
+        conn_str = (
+            f"mssql+pyodbc://{user}:{password}@{server}/{database}"
+            "?driver=ODBC+Driver+18+for+SQL+Server"
+        )
+        
         _engine = create_engine(
-            f"mssql+pymssql://{user}:{password}@{server}/{database}",
+            conn_str,
             pool_pre_ping=True,
             pool_recycle=1800,    
-            pool_size=5,          # Reduced from 12 to prevent connection limits
-            max_overflow=5,       
+            pool_size=12,         # You can safely bump this back up now!
+            max_overflow=6,       
             connect_args={
-                "timeout": 120,       
-                "login_timeout": 30
+                "timeout": 120    # Keeps the generous timeout for heavy aggregations
             }
         )
     return _engine
