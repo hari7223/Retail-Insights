@@ -180,11 +180,15 @@ def data_pull():
 def upload():
     if request.method == "POST":
         import tempfile
+        import os
+
+        # Primary key(s) used to detect duplicates and trigger updates
         PKS = {
             "households":   ["HSHD_NUM"],
             "products":     ["PRODUCT_NUM"],
             "transactions": ["BASKET_NUM", "PRODUCT_NUM"],
         }
+
         files = {}
         for key in ["households", "transactions", "products"]:
             f = request.files.get(key)
@@ -197,40 +201,85 @@ def upload():
             try:
                 engine = get_engine()
                 summary = []
-                for table, path in [("households", files["households"]), ("products", files["products"]), ("transactions", files["transactions"])]:
-                    df = pd.read_csv(path)
-                    df.columns = df.columns.str.strip()
-                    df = df.astype(str).replace('nan', None)
-
-                    pk_cols = PKS[table]
+                
+                for table, path in [("households", files["households"]), 
+                                    ("products", files["products"]), 
+                                    ("transactions", files["transactions"])]:
+                    
                     staging = f"_stage_{table}"
-                    cols     = ", ".join(f"s.[{c}]" for c in df.columns)
-                    pk_join  = " AND ".join(f"m.[{c}] = s.[{c}]" for c in pk_cols)
-
-                    df.to_sql(staging, engine, if_exists="replace", index=False, chunksize=500)
+                    pk_cols = PKS[table]
+                    
+                    # 1. Clear out any old staging tables
                     with engine.connect() as conn:
-                        result = conn.execute(text(f"""
-                            INSERT INTO [{table}] ({', '.join(f'[{c}]' for c in df.columns)})
-                            SELECT {cols} FROM [{staging}] s
-                            WHERE NOT EXISTS (SELECT 1 FROM [{table}] m WHERE {pk_join})
-                        """))
-                        inserted = result.rowcount
+                        conn.execute(text(f"DROP TABLE IF EXISTS [{staging}]"))
+                        conn.commit()
+
+                    # 2. Chunking to prevent memory crashes on large files
+                    total_rows = 0
+                    all_columns = []
+                    
+                    for chunk in pd.read_csv(path, chunksize=50000, low_memory=False):
+                        chunk.columns = chunk.columns.str.strip()
+                        chunk = chunk.astype(str).replace('nan', None)
+                        
+                        if not all_columns:
+                            all_columns = chunk.columns.tolist()
+                            
+                        chunk.to_sql(staging, engine, if_exists="append", index=False, chunksize=5000)
+                        total_rows += len(chunk)
+                        
+                    # 3. Build dynamic SQL for the MERGE (Upsert) operation
+                    non_pk_cols = [c for c in all_columns if c not in pk_cols]
+                    
+                    join_condition = " AND ".join([f"m.[{c}] = s.[{c}]" for c in pk_cols])
+                    insert_cols = ", ".join([f"[{c}]" for c in all_columns])
+                    insert_vals = ", ".join([f"s.[{c}]" for c in all_columns])
+                    
+                    # If there are columns to update, build the UPDATE SET clause
+                    update_clause = ""
+                    if non_pk_cols:
+                        update_set = ", ".join([f"m.[{c}] = s.[{c}]" for c in non_pk_cols])
+                        update_clause = f"WHEN MATCHED THEN UPDATE SET {update_set}"
+
+                    # 4. Execute the MERGE
+                    # Note: T-SQL MERGE statements MUST end with a semicolon
+                    merge_query = f"""
+                        MERGE INTO [{table}] AS m
+                        USING [{staging}] AS s
+                        ON {join_condition}
+                        {update_clause}
+                        WHEN NOT MATCHED BY TARGET THEN
+                            INSERT ({insert_cols})
+                            VALUES ({insert_vals});
+                    """
+
+                    with engine.connect() as conn:
+                        result = conn.execute(text(merge_query))
+                        # In a MERGE, rowcount returns total rows inserted + updated
+                        processed = result.rowcount 
+                        
                         conn.execute(text(f"DROP TABLE [{staging}]"))
                         conn.commit()
-                    summary.append(f"{table}: {inserted} new, {len(df) - inserted} skipped")
 
-                # Clear file caches to reflect new data
+                    summary.append(f"{table}: {processed} inserted/updated")
+
+                # 5. Invalidate all caches to ensure data is fresh on next load
                 if os.path.exists(DASHBOARD_CACHE_FILE): os.remove(DASHBOARD_CACHE_FILE)
                 if os.path.exists(BASKET_CACHE_FILE): os.remove(BASKET_CACHE_FILE)
+                if os.path.exists("models/clv_model.pkl"): os.remove("models/clv_model.pkl")
+                if os.path.exists("models/churn_model.pkl"): os.remove("models/churn_model.pkl")
                 
                 flash("Upload complete — " + " | ".join(summary))
+                
             except Exception as e:
                 flash(f"Upload failed: {e}")
             finally:
                 for p in files.values():
-                    os.unlink(p)
+                    if os.path.exists(p):
+                        os.unlink(p)
         else:
             flash("Please upload all three files.")
+            
     return render_template("upload.html")
 
 # ── Dashboard Logic ───────────────────────────────────────────────────────────
@@ -247,20 +296,20 @@ def get_dashboard_data():
             except: pass
 
     SQLS = {
-        "income": "SELECT h.INCOME_RANGE, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE ORDER BY avg_spend DESC",
-        "hhsize": "SELECT h.HH_SIZE, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.HH_SIZE NOT IN ('null','') AND h.HH_SIZE IS NOT NULL GROUP BY h.HH_SIZE ORDER BY h.HH_SIZE",
-        "children": "SELECT CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END as children_status, AVG(CAST(t.SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM GROUP BY CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END",
-        "region": "SELECT STORE_R, SUM(CAST(SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE STORE_R NOT IN ('null','') AND STORE_R IS NOT NULL GROUP BY STORE_R ORDER BY total_spend DESC",
-        "weekly": "SELECT CAST(WEEK_NUM AS INT) as WEEK_NUM, CAST(YEAR AS INT) as YEAR, SUM(CAST(SPEND AS DECIMAL(10,2))) as spend FROM transactions GROUP BY WEEK_NUM, YEAR ORDER BY YEAR, CAST(WEEK_NUM AS INT)",
-        "dept_year": "SELECT p.DEPARTMENT, CAST(t.YEAR AS INT) as YEAR, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.YEAR NOT IN ('null','') AND t.YEAR IS NOT NULL GROUP BY p.DEPARTMENT, t.YEAR ORDER BY t.YEAR, total_spend DESC",
-        "basket": "WITH top_baskets AS (SELECT TOP 5000 BASKET_NUM FROM transactions GROUP BY BASKET_NUM ORDER BY SUM(CAST(SPEND AS DECIMAL(10,2))) DESC), basket_comm AS (SELECT DISTINCT t.BASKET_NUM, p.COMMODITY FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN top_baskets b ON t.BASKET_NUM = b.BASKET_NUM WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL) SELECT TOP 10 c1.COMMODITY as item_1, c2.COMMODITY as item_2, COUNT(*) as times_bought_together FROM basket_comm c1 JOIN basket_comm c2 ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY GROUP BY c1.COMMODITY, c2.COMMODITY ORDER BY times_bought_together DESC",
-        "seasonal": "SELECT CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, SUM(CAST(SPEND AS DECIMAL(10,2))) as total_spend, AVG(CAST(SPEND AS DECIMAL(10,2))) as avg_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE WEEK_NUM NOT IN ('null','') AND WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END",
-        "seasonal_commodity": "SELECT TOP 20 CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, p.DEPARTMENT, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.WEEK_NUM NOT IN ('null','') AND t.WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END, p.DEPARTMENT ORDER BY season, total_spend DESC",
-        "brand": "SELECT p.BRAND_TY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(*) as transaction_count FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL GROUP BY p.BRAND_TY",
-        "organic": "SELECT p.NATURAL_ORGANIC_FLAG, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as buyers FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.NATURAL_ORGANIC_FLAG NOT IN ('null','') AND p.NATURAL_ORGANIC_FLAG IS NOT NULL GROUP BY p.NATURAL_ORGANIC_FLAG",
-        "brand_income": "SELECT h.INCOME_RANGE, p.BRAND_TY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL AND h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE, p.BRAND_TY ORDER BY h.INCOME_RANGE, p.BRAND_TY",
-        "dept": "SELECT p.DEPARTMENT, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as unique_households FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM GROUP BY p.DEPARTMENT ORDER BY total_spend DESC",
-        "commodity": "SELECT TOP 10 p.COMMODITY, SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM GROUP BY p.COMMODITY ORDER BY total_spend DESC"
+        "income": "SELECT h.INCOME_RANGE, AVG(CAST(t.SPEND AS FLOAT)) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE ORDER BY avg_spend DESC",
+        "hhsize": "SELECT h.HH_SIZE, AVG(CAST(t.SPEND AS FLOAT)) as avg_spend FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.HH_SIZE NOT IN ('null','') AND h.HH_SIZE IS NOT NULL GROUP BY h.HH_SIZE ORDER BY h.HH_SIZE",
+        "children": "SELECT CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END as children_status, AVG(CAST(t.SPEND AS FLOAT)) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM GROUP BY CASE WHEN h.CHILDREN = 'null' OR h.CHILDREN IS NULL THEN 'Unknown' WHEN TRY_CAST(h.CHILDREN AS FLOAT) > 0 THEN 'Has Children' ELSE 'No Children' END",
+        "region": "SELECT STORE_R, SUM(CAST(SPEND AS FLOAT)) as total_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE STORE_R NOT IN ('null','') AND STORE_R IS NOT NULL GROUP BY STORE_R ORDER BY total_spend DESC",
+        "weekly": "SELECT CAST(WEEK_NUM AS INT) as WEEK_NUM, CAST(YEAR AS INT) as YEAR, SUM(CAST(SPEND AS FLOAT)) as spend FROM transactions GROUP BY WEEK_NUM, YEAR ORDER BY YEAR, CAST(WEEK_NUM AS INT)",
+        "dept_year": "SELECT p.DEPARTMENT, CAST(t.YEAR AS INT) as YEAR, SUM(CAST(t.SPEND AS FLOAT)) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.YEAR NOT IN ('null','') AND t.YEAR IS NOT NULL GROUP BY p.DEPARTMENT, t.YEAR ORDER BY t.YEAR, total_spend DESC",
+        "basket": "WITH top_baskets AS (SELECT TOP 5000 BASKET_NUM FROM transactions GROUP BY BASKET_NUM ORDER BY SUM(CAST(SPEND AS FLOAT)) DESC), basket_comm AS (SELECT DISTINCT t.BASKET_NUM, p.COMMODITY FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN top_baskets b ON t.BASKET_NUM = b.BASKET_NUM WHERE p.COMMODITY NOT IN ('null','') AND p.COMMODITY IS NOT NULL) SELECT TOP 10 c1.COMMODITY as item_1, c2.COMMODITY as item_2, COUNT(*) as times_bought_together FROM basket_comm c1 JOIN basket_comm c2 ON c1.BASKET_NUM = c2.BASKET_NUM AND c1.COMMODITY < c2.COMMODITY GROUP BY c1.COMMODITY, c2.COMMODITY ORDER BY times_bought_together DESC",
+        "seasonal": "SELECT CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, SUM(CAST(SPEND AS FLOAT)) as total_spend, AVG(CAST(SPEND AS FLOAT)) as avg_spend, COUNT(DISTINCT HSHD_NUM) as unique_hh FROM transactions WHERE WEEK_NUM NOT IN ('null','') AND WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END",
+        "seasonal_commodity": "SELECT TOP 20 CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END as season, p.DEPARTMENT, SUM(CAST(t.SPEND AS FLOAT)) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE t.WEEK_NUM NOT IN ('null','') AND t.WEEK_NUM IS NOT NULL GROUP BY CASE WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 1 AND 13 THEN 'Spring' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 14 AND 26 THEN 'Summer' WHEN CAST(t.WEEK_NUM AS INT) BETWEEN 27 AND 39 THEN 'Fall' ELSE 'Winter' END, p.DEPARTMENT ORDER BY season, total_spend DESC",
+        "brand": "SELECT p.BRAND_TY, SUM(CAST(t.SPEND AS FLOAT)) as total_spend, COUNT(*) as transaction_count FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL GROUP BY p.BRAND_TY",
+        "organic": "SELECT p.NATURAL_ORGANIC_FLAG, SUM(CAST(t.SPEND AS FLOAT)) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as buyers FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM WHERE p.NATURAL_ORGANIC_FLAG NOT IN ('null','') AND p.NATURAL_ORGANIC_FLAG IS NOT NULL GROUP BY p.NATURAL_ORGANIC_FLAG",
+        "brand_income": "SELECT h.INCOME_RANGE, p.BRAND_TY, SUM(CAST(t.SPEND AS FLOAT)) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE p.BRAND_TY NOT IN ('null','') AND p.BRAND_TY IS NOT NULL AND h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE, p.BRAND_TY ORDER BY h.INCOME_RANGE, p.BRAND_TY",
+        "dept": "SELECT p.DEPARTMENT, SUM(CAST(t.SPEND AS FLOAT)) as total_spend, COUNT(DISTINCT t.HSHD_NUM) as unique_households FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM GROUP BY p.DEPARTMENT ORDER BY total_spend DESC",
+        "commodity": "SELECT TOP 10 p.COMMODITY, SUM(CAST(t.SPEND AS FLOAT)) as total_spend FROM transactions t JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM GROUP BY p.COMMODITY ORDER BY total_spend DESC"
     }
 
     results = {}
