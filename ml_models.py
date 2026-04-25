@@ -19,35 +19,25 @@ _CHURN_FEATURE_LABELS = {
 _clv_model   = None
 _churn_model = None
 
-def _retrain():
-    """Retrain models in-process — used when pkl files are missing or incompatible."""
-    import os
-    os.makedirs("models", exist_ok=True)
-    from train_models import load_data, build_features, train_clv_model, train_churn_model
-    tx, hh = load_data()
-    features = build_features(tx, hh)
-    train_clv_model(features)
-    train_churn_model(features)
-    features.to_csv("models/features.csv", index=False)
-
 def _load_models():
     global _clv_model, _churn_model
     if _clv_model is not None:
-        return
+        return True
     try:
         _clv_model   = joblib.load("models/clv_model.pkl")
         _churn_model = joblib.load("models/churn_model.pkl")
+        return True
     except Exception:
-        _retrain()
-        _clv_model   = joblib.load("models/clv_model.pkl")
-        _churn_model = joblib.load("models/churn_model.pkl")
+        # Fails gracefully instead of hijacking the HTTP request to train models
+        return False
 
 def _load_features():
     features = pd.read_csv("models/features.csv")
     return features.drop_duplicates(subset=['HSHD_NUM']).reset_index(drop=True)
 
 def get_all_predictions():
-    _load_models()
+    if not _load_models():
+        raise Exception("Models are currently training in the background. Please try again shortly.")
     features = _load_features()
     features['clv_score']    = _clv_model.predict(features[FEATURE_COLS_CLV])
     features['churn_prob']   = _churn_model.predict_proba(features[FEATURE_COLS_CHURN])[:, 1]
@@ -60,7 +50,8 @@ def get_all_predictions():
                       'recency', 'frequency', 'total_spend']]
 
 def get_churn_importances():
-    _load_models()
+    if not _load_models():
+        return []
     return sorted(
         [{'feature': _CHURN_FEATURE_LABELS[c], 'importance': round(float(v), 4)}
          for c, v in zip(FEATURE_COLS_CHURN, _churn_model.feature_importances_)],
@@ -68,12 +59,14 @@ def get_churn_importances():
     )
 
 def get_churn_correlations():
-    """Pearson correlation between numerical features and the churn label."""
-    features = _load_features()
-    features['churned'] = (features['recency'] > 90).astype(int)
-    num_cols = ['recency', 'frequency', 'avg_basket_value', 'total_spend', 'spend_trend']
-    labels   = ['Recency (days)', 'Visit Frequency', 'Avg Basket Value',
-                 'Total Spend', 'Spend Trend']
-    corr = features[num_cols + ['churned']].corr()['churned'].drop('churned')
-    return [{'feature': lbl, 'correlation': round(float(val), 3)}
-            for lbl, val in zip(labels, corr.values)]
+    try:
+        features = _load_features()
+        features['churned'] = (features['recency'] > 90).astype(int)
+        num_cols = ['recency', 'frequency', 'avg_basket_value', 'total_spend', 'spend_trend']
+        labels   = ['Recency (days)', 'Visit Frequency', 'Avg Basket Value',
+                     'Total Spend', 'Spend Trend']
+        corr = features[num_cols + ['churned']].corr()['churned'].drop('churned')
+        return [{'feature': lbl, 'correlation': round(float(val), 3)}
+                for lbl, val in zip(labels, corr.values)]
+    except Exception:
+        return []

@@ -21,39 +21,42 @@ def get_engine():
     return create_engine(f"mssql+pymssql://{user}:{password}@{server}/{database}")
 
 def load_data():
+    # We only need the household demographics directly
     with get_engine().connect() as conn:
-        tx = pd.read_sql("SELECT * FROM transactions", conn)
         hh = pd.read_sql("SELECT * FROM households", conn)
+        
+        # SQL PUSHDOWN: Instead of downloading 3.6M rows, we let SQL Server 
+        # calculate the RFM metrics and return just ~5,000 household rows.
+        rfm_query = """
+        WITH max_date AS (
+            SELECT MAX(CAST(PURCHASE_DATE AS DATE)) as snap_date FROM transactions
+        ),
+        agg AS (
+            SELECT 
+                t.HSHD_NUM,
+                MAX(CAST(t.PURCHASE_DATE AS DATE)) as last_purchase,
+                COUNT(DISTINCT t.BASKET_NUM) as frequency,
+                SUM(CAST(t.SPEND AS DECIMAL(10,2))) as total_spend,
+                SUM(CAST(t.UNITS AS INT)) as total_units,
+                SUM(CASE WHEN CAST(t.PURCHASE_DATE AS DATE) >= DATEADD(month, -6, (SELECT snap_date FROM max_date)) 
+                         THEN CAST(t.SPEND AS DECIMAL(10,2)) ELSE 0 END) as recent_spend,
+                SUM(CASE WHEN CAST(t.PURCHASE_DATE AS DATE) < DATEADD(month, -6, (SELECT snap_date FROM max_date)) 
+                         THEN CAST(t.SPEND AS DECIMAL(10,2)) ELSE 0 END) as older_spend,
+                (SELECT snap_date FROM max_date) as snapshot_date
+            FROM transactions t
+            GROUP BY t.HSHD_NUM
+        )
+        SELECT * FROM agg
+        """
+        rfm = pd.read_sql(rfm_query, conn)
 
-    # Convert types after loading since all columns are VARCHAR in DB
-    tx['SPEND'] = pd.to_numeric(tx['SPEND'], errors='coerce')
-    tx['UNITS'] = pd.to_numeric(tx['UNITS'], errors='coerce')
-    tx['WEEK_NUM'] = pd.to_numeric(tx['WEEK_NUM'], errors='coerce')
-    tx['HSHD_NUM'] = pd.to_numeric(tx['HSHD_NUM'], errors='coerce')
-    tx['PURCHASE_DATE'] = pd.to_datetime(tx['PURCHASE_DATE'], format='%d-%b-%y', errors='coerce')
-
-    # Guard against duplicate rows from repeated uploads
-    tx = tx.drop_duplicates()
     hh = hh.drop_duplicates(subset=['HSHD_NUM'])
+    return rfm, hh
 
-    return tx, hh
-
-def build_features(tx, hh):
-    snapshot_date = tx['PURCHASE_DATE'].max()
-
-    rfm = tx.groupby('HSHD_NUM').agg(
-        recency=('PURCHASE_DATE', lambda x: (snapshot_date - x.max()).days),
-        frequency=('BASKET_NUM', 'nunique'),
-        total_spend=('SPEND', 'sum'),
-        avg_basket_value=('SPEND', lambda x: x.sum() / max(tx.loc[x.index, 'BASKET_NUM'].nunique(), 1)),
-        total_units=('UNITS', 'sum')
-    ).reset_index()
-
-    # Spend trend: last 6 months vs prior 6 months
-    cutoff = snapshot_date - pd.DateOffset(months=6)
-    recent = tx[tx['PURCHASE_DATE'] >= cutoff].groupby('HSHD_NUM')['SPEND'].sum().rename('recent_spend')
-    older = tx[tx['PURCHASE_DATE'] < cutoff].groupby('HSHD_NUM')['SPEND'].sum().rename('older_spend')
-    rfm = rfm.merge(recent, on='HSHD_NUM', how='left').merge(older, on='HSHD_NUM', how='left')
+def build_features(rfm, hh):
+    # Calculate Pandas-level features based on the SQL aggregated data
+    rfm['recency'] = (pd.to_datetime(rfm['snapshot_date']) - pd.to_datetime(rfm['last_purchase'])).dt.days
+    rfm['avg_basket_value'] = rfm['total_spend'] / rfm['frequency'].clip(lower=1)
     rfm['spend_trend'] = rfm['recent_spend'].fillna(0) - rfm['older_spend'].fillna(0)
 
     # Encode demographics
@@ -62,6 +65,7 @@ def build_features(tx, hh):
         hh[col] = le.fit_transform(hh[col].astype(str))
 
     hh['HSHD_NUM'] = pd.to_numeric(hh['HSHD_NUM'], errors='coerce')
+    rfm['HSHD_NUM'] = pd.to_numeric(rfm['HSHD_NUM'], errors='coerce')
 
     features = rfm.merge(
         hh[['HSHD_NUM', 'INCOME_RANGE', 'AGE_RANGE', 'HH_SIZE', 'L', 'CHILDREN']],
@@ -69,6 +73,7 @@ def build_features(tx, hh):
     )
     features['CHILDREN'] = (features['CHILDREN'].astype(str).str.strip() == 'Y').astype(int)
     features = features.fillna(0)
+    
     return features
 
 def train_clv_model(features):
