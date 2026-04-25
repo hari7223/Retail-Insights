@@ -21,15 +21,18 @@ def get_engine():
     password = os.getenv('SQL_PASSWORD')
 
     conn_str = (
-        f"mssql+pyodbc://{user}:{password}@{server}/{database}"
-        "?driver=ODBC+Driver+18+for+SQL+Server"
-    )
+            f"mssql+pyodbc://{user}:{password}@{server}/{database}"
+            f"?driver=ODBC+Driver+18+for+SQL+Server"
+            f"&Encrypt=yes&TrustServerCertificate=no"
+            f"&Connection+Timeout=60&ConnectRetryCount=3"
+        )
 
     return create_engine(
             conn_str,
             pool_pre_ping=True,
             pool_recycle=1800,    
-            pool_size=12,         # You can safely bump this back up now!
+            pool_size=12,
+            pool_timeout=60,       
             max_overflow=6,       
             connect_args={
                 "timeout": 120    # Keeps the generous timeout for heavy aggregations

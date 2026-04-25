@@ -27,17 +27,21 @@ def get_engine():
         # Swapped pymssql for pyodbc and specified the Microsoft ODBC Driver
         conn_str = (
             f"mssql+pyodbc://{user}:{password}@{server}/{database}"
-            "?driver=ODBC+Driver+18+for+SQL+Server"
+            f"?driver=ODBC+Driver+18+for+SQL+Server"
+            f"&Encrypt=yes&TrustServerCertificate=no"
+            f"&Connection+Timeout=60&ConnectRetryCount=3"
         )
         
         _engine = create_engine(
             conn_str,
             pool_pre_ping=True,
             pool_recycle=1800,    
-            pool_size=12,         # You can safely bump this back up now!
+            pool_size=12,
+            pool_timeout=60,       
             max_overflow=6,       
             connect_args={
-                "timeout": 120    # Keeps the generous timeout for heavy aggregations
+                "timeout": 120,
+                "fast_executemany": True    # Keeps the generous timeout for heavy aggregations
             }
         )
     return _engine
@@ -51,7 +55,7 @@ def login_required(f):
         return f(*args, **kwargs)
     return wrapper
 
-# ── Background ML training ─────────────────────────────────────────────────────
+
 # ── Synchronous ML Training ───────────────────────────────────────────────────
 def ensure_ml_models():
     """Trains ML models synchronously before the server handles any requests."""
@@ -203,13 +207,21 @@ def upload():
         try:
             engine = get_engine()
             summary = []
+            # Explicit order: Wipe the child table (transactions) before the parents
+            ordered_tables = [
+                ("transactions", files_to_process.get("transactions")),
+                ("products", files_to_process.get("products")),
+                ("households", files_to_process.get("households"))
+            ]
             
-            for table, path in files_to_process.items():
+            for table, path in ordered_tables:
+                if not path: continue # Skip if missing
                 
-                # 2. Delete existing data
+                # 2. Instantly wipe existing data
                 with engine.connect() as conn:
-                    conn.execute(text(f"DELETE FROM [{table}]"))
+                    conn.execute(text(f"TRUNCATE TABLE [{table}]"))
                     conn.commit()
+                
 
                 # 3. Load the new CSV into the empty table
                 total_rows = 0
@@ -217,7 +229,7 @@ def upload():
                     chunk.columns = chunk.columns.str.strip()
                     chunk = chunk.astype(str).replace('nan', None)
                     
-                    chunk.to_sql(table, engine, if_exists="append", index=False, chunksize=5000)
+                    chunk.to_sql(table, engine, if_exists="append", index=False)
                     total_rows += len(chunk)
                     
                 summary.append(f"{table}: {total_rows} replaced")
