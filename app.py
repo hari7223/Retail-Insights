@@ -147,14 +147,15 @@ def data_pull():
 
     df = pd.read_sql(f"""
     SELECT
-        h.HSHD_NUM, t.BASKET_NUM, t.PURCHASE_DATE, t.PRODUCT_NUM,
+        t.HSHD_NUM, t.BASKET_NUM, t.PURCHASE_DATE, t.PRODUCT_NUM,
         p.DEPARTMENT, p.COMMODITY, t.SPEND, t.UNITS,
         t.STORE_R, t.WEEK_NUM, t.YEAR,
         h.L, h.AGE_RANGE, h.MARITAL, h.INCOME_RANGE,
         h.HOMEOWNER, h.HSHD_COMPOSITION, h.HH_SIZE, h.CHILDREN
     FROM transactions t
-    LEFT JOIN households h ON t.HSHD_NUM = h.HSHD_NUM
-    LEFT JOIN products p ON t.PRODUCT_NUM = p.PRODUCT_NUM
+    -- Safely convert both sides to integers before comparing
+    LEFT JOIN households h ON TRY_CAST(t.HSHD_NUM AS INT) = TRY_CAST(h.HSHD_NUM AS INT)
+    LEFT JOIN products p ON TRY_CAST(t.PRODUCT_NUM AS INT) = TRY_CAST(p.PRODUCT_NUM AS INT)
     {where_clause}
     ORDER BY {order}
     OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
