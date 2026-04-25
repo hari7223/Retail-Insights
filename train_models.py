@@ -14,20 +14,18 @@ load_dotenv()
 from sqlalchemy import create_engine, text
 
 def get_engine():
-    global _engine
-    if _engine is None:
-        server   = os.getenv('SQL_SERVER')
-        database = os.getenv('SQL_DATABASE')
-        user     = os.getenv('SQL_USER')
-        password = os.getenv('SQL_PASSWORD')
-        
-        # Swapped pymssql for pyodbc and specified the Microsoft ODBC Driver
-        conn_str = (
-            f"mssql+pyodbc://{user}:{password}@{server}/{database}"
-            "?driver=ODBC+Driver+18+for+SQL+Server"
-        )
-        
-        _engine = create_engine(
+    
+    server   = os.getenv('SQL_SERVER')
+    database = os.getenv('SQL_DATABASE')
+    user     = os.getenv('SQL_USER')
+    password = os.getenv('SQL_PASSWORD')
+
+    conn_str = (
+        f"mssql+pyodbc://{user}:{password}@{server}/{database}"
+        "?driver=ODBC+Driver+18+for+SQL+Server"
+    )
+
+    return create_engine(
             conn_str,
             pool_pre_ping=True,
             pool_recycle=1800,    
@@ -37,7 +35,6 @@ def get_engine():
                 "timeout": 120    # Keeps the generous timeout for heavy aggregations
             }
         )
-    return _engine
 
 def load_data():
     # We only need the household demographics directly
