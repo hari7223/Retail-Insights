@@ -299,6 +299,15 @@ def get_dashboard_data():
     joblib.dump(cache_data, DASHBOARD_CACHE_FILE)
     return cache_data
 
+@app.route("/api/warm-cache")
+def warm_cache():
+    """Hidden endpoint for a cron job to keep the dashboard cache fresh."""
+    try:
+        get_dashboard_data()
+        return {"status": "success", "message": "Cache warmed."}, 200
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 500
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
