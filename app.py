@@ -225,12 +225,18 @@ def upload():
                 # 3. Load the new CSV into the empty table
                 total_rows = 0
                 for chunk in pd.read_csv(path, chunksize=50000, low_memory=False):
+                    # Clean up white spaces in headers
                     chunk.columns = chunk.columns.str.strip()
+                    
+                    # THE FIX: Safely map the CSV column to the Database column
+                    chunk.rename(columns={'PURCHASE_': 'PURCHASE_DATE'}, inplace=True)
+                    
+                    # Convert to string and handle nulls
                     chunk = chunk.astype(str).replace('nan', None)
                     
+                    # Send to Azure
                     chunk.to_sql(table, engine, if_exists="append", index=False)
                     total_rows += len(chunk)
-                    
                 summary.append(f"{table}: {total_rows} replaced")
 
             # 4. Invalidate caches and models
