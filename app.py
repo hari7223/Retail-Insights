@@ -150,11 +150,19 @@ def data_pull():
         params = {"hshd_int": int(hshd_num)}   # "10" or "0010" both become 10
 
     df = pd.read_sql(text(f"""
-    SELECT ...
-    {where_clause}
-    ORDER BY {order}
-    OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
-    """), get_engine(), params=params if params else None)
+            SELECT
+                t.HSHD_NUM, t.BASKET_NUM, t.PURCHASE_DATE, t.PRODUCT_NUM,
+                p.DEPARTMENT, p.COMMODITY, t.SPEND, t.UNITS,
+                t.STORE_R, t.WEEK_NUM, t.YEAR,
+                h.L, h.AGE_RANGE, h.MARITAL, h.INCOME_RANGE,
+                h.HOMEOWNER, h.HSHD_COMPOSITION, h.HH_SIZE, h.CHILDREN
+            FROM transactions t
+            LEFT JOIN households h ON TRY_CAST(t.HSHD_NUM AS INT) = TRY_CAST(h.HSHD_NUM AS INT)
+            LEFT JOIN products p ON TRY_CAST(t.PRODUCT_NUM AS INT) = TRY_CAST(p.PRODUCT_NUM AS INT)
+            {where_clause}
+            ORDER BY {order}
+            OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
+            """), get_engine(), params=params if params else None)
 
     if show_all != "true":
         count_query = text("SELECT COUNT(*) as cnt FROM transactions WHERE TRY_CAST(HSHD_NUM AS INT) = :hshd_int")
