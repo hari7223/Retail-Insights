@@ -142,31 +142,26 @@ def data_pull():
 
     order = f"{sort_col} {'DESC' if sort_dir == 'desc' else 'ASC'}"
     
-    where_clause = "" if show_all == "true" else "WHERE t.HSHD_NUM = ?"
-    params = None if show_all == "true" else (hshd_num.zfill(4),)
+    if show_all == "true":
+        where_clause = ""
+        params = {}
+    else:
+        where_clause = "WHERE TRY_CAST(t.HSHD_NUM AS INT) = :hshd_int"
+        params = {"hshd_int": int(hshd_num)}   # "10" or "0010" both become 10
 
-    df = pd.read_sql(f"""
-    SELECT
-        t.HSHD_NUM, t.BASKET_NUM, t.PURCHASE_DATE, t.PRODUCT_NUM,
-        p.DEPARTMENT, p.COMMODITY, t.SPEND, t.UNITS,
-        t.STORE_R, t.WEEK_NUM, t.YEAR,
-        h.L, h.AGE_RANGE, h.MARITAL, h.INCOME_RANGE,
-        h.HOMEOWNER, h.HSHD_COMPOSITION, h.HH_SIZE, h.CHILDREN
-    FROM transactions t
-    -- Safely convert both sides to integers before comparing
-    LEFT JOIN households h ON TRY_CAST(t.HSHD_NUM AS INT) = TRY_CAST(h.HSHD_NUM AS INT)
-    LEFT JOIN products p ON TRY_CAST(t.PRODUCT_NUM AS INT) = TRY_CAST(p.PRODUCT_NUM AS INT)
+    df = pd.read_sql(text(f"""
+    SELECT ...
     {where_clause}
     ORDER BY {order}
     OFFSET {offset} ROWS FETCH NEXT {page_size} ROWS ONLY
-    """, get_engine(), params=params)
+    """), get_engine(), params=params if params else None)
 
-    if show_all == "true":
-        count_query = "SELECT SUM(row_count) as cnt FROM sys.dm_db_partition_stats WHERE object_id=OBJECT_ID('transactions') AND index_id < 2"
-        total = int(pd.read_sql(count_query, get_engine()).iloc[0]['cnt'] or 0)
+    if show_all != "true":
+        count_query = text("SELECT COUNT(*) as cnt FROM transactions WHERE TRY_CAST(HSHD_NUM AS INT) = :hshd_int")
+        total = pd.read_sql(count_query, get_engine(), params={"hshd_int": int(hshd_num)}).iloc[0]['cnt']
     else:
-        count_query = "SELECT COUNT(*) as cnt FROM transactions WHERE HSHD_NUM = ?"
-        total = pd.read_sql(count_query, get_engine(), params=(hshd_num.zfill(4),)).iloc[0]['cnt']
+        count_query = text("SELECT COUNT(*) as cnt FROM transactions")
+        total = pd.read_sql(count_query, get_engine()).iloc[0]['cnt']
         
     total_pages = max(1, -(-total // page_size))
 
@@ -296,34 +291,35 @@ def get_dashboard_data():
         for fut in concurrent.futures.as_completed(fmap):
             results[fmap[fut]] = fut.result()
 
+    # Lines 299–327 — replace with:
     top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
+    ml_ok = False
 
     ensure_ml_models()
-    
     try:
         from ml_models import get_all_predictions
         preds = get_all_predictions()
-        top_clv = preds.nlargest(10, 'clv_score')[
+        top_clv         = preds.nlargest(10, 'clv_score')[
             ['HSHD_NUM','clv_score','churn_prob','risk_segment','frequency','recency']
         ].to_dict("records")
         churn_counts    = preds['risk_segment'].value_counts().to_dict()
         avg_clv         = round(preds['clv_score'].mean(), 2)
         high_risk_count = int((preds['risk_segment'] == 'High Risk').sum())
+        ml_ok = True
     except Exception as e:
         print(f"ML data not ready for dashboard: {e}")
 
     cache_data = {
-        "income": results.get("income", pd.DataFrame()), "hhsize": results.get("hhsize", pd.DataFrame()), 
-        "children": results.get("children", pd.DataFrame()), "region": results.get("region", pd.DataFrame()), 
-        "weekly": results.get("weekly", pd.DataFrame()), "dept_year": results.get("dept_year", pd.DataFrame()),
-        "basket": results.get("basket", pd.DataFrame()), "seasonal": results.get("seasonal", pd.DataFrame()),
-        "seasonal_commodity": results.get("seasonal_commodity", pd.DataFrame()), "brand": results.get("brand", pd.DataFrame()),
-        "organic": results.get("organic", pd.DataFrame()), "brand_income": results.get("brand_income", pd.DataFrame()),
-        "dept": results.get("dept", pd.DataFrame()), "commodity": results.get("commodity", pd.DataFrame()),
-        "top_clv": top_clv, "churn_counts": churn_counts, "avg_clv": avg_clv, "high_risk_count": high_risk_count,
+        "income": results.get("income", pd.DataFrame()),
+        # ... all your SQL results ...
+        "top_clv": top_clv, "churn_counts": churn_counts,
+        "avg_clv": avg_clv, "high_risk_count": high_risk_count,
     }
 
-    joblib.dump(cache_data, DASHBOARD_CACHE_FILE)
+    # Only cache if ML succeeded — don't freeze empty churn data for 30 min
+    if ml_ok:
+        joblib.dump(cache_data, DASHBOARD_CACHE_FILE)
+
     return cache_data
 @app.route("/api/warm-cache")
 def warm_cache():
