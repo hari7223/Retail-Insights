@@ -244,9 +244,9 @@ def upload():
             if os.path.exists(BASKET_CACHE_FILE): os.remove(BASKET_CACHE_FILE)
             if os.path.exists("models/clv_model.pkl"): os.remove("models/clv_model.pkl")
             if os.path.exists("models/churn_model.pkl"): os.remove("models/churn_model.pkl")
-            
-            flash("Upload complete — " + " | ".join(summary))
-            
+
+            flash("Upload complete. Please wait a moment while the data is processed.")
+
         except Exception as e:
             flash(f"Upload failed: {e}")
         finally:
@@ -297,6 +297,9 @@ def get_dashboard_data():
             results[fmap[fut]] = fut.result()
 
     top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
+
+    ensure_ml_models()
+    
     try:
         from ml_models import get_all_predictions
         preds = get_all_predictions()
@@ -322,7 +325,6 @@ def get_dashboard_data():
 
     joblib.dump(cache_data, DASHBOARD_CACHE_FILE)
     return cache_data
-
 @app.route("/api/warm-cache")
 def warm_cache():
     """Hidden endpoint for a cron job to keep the dashboard cache fresh."""
@@ -438,6 +440,8 @@ def compute_basket_ml():
 @login_required
 def ml_results():
     all_preds, stats, churn_importances, churn_correlations = [], {}, [], []
+    ensure_ml_models()
+
     try:
         from ml_models import get_all_predictions, get_churn_importances, get_churn_correlations
         preds = get_all_predictions()

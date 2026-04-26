@@ -35,7 +35,8 @@ def get_engine():
             pool_timeout=60,       
             max_overflow=6,       
             connect_args={
-                "timeout": 120    # Keeps the generous timeout for heavy aggregations
+                "timeout": 120,
+                        # Keeps the generous timeout for heavy aggregations
             }
         )
 
