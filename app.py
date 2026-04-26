@@ -244,9 +244,20 @@ def upload():
 
             # 4. Invalidate caches and models
             if os.path.exists(DASHBOARD_CACHE_FILE): os.remove(DASHBOARD_CACHE_FILE)
+
             if os.path.exists(BASKET_CACHE_FILE): os.remove(BASKET_CACHE_FILE)
             if os.path.exists("models/clv_model.pkl"): os.remove("models/clv_model.pkl")
             if os.path.exists("models/churn_model.pkl"): os.remove("models/churn_model.pkl")
+
+            try:
+                from train_models import load_data, build_features, train_clv_model, train_churn_model
+                tx, hh = load_data()
+                features = build_features(tx, hh)
+                train_clv_model(features)
+                train_churn_model(features)
+                features.to_csv("models/features.csv", index=False)
+            except Exception as e:
+                flash(f"Warning: ML model retraining failed: {e}")
 
             flash("Upload complete. Please wait a moment while the data is processed.")
 
@@ -270,8 +281,18 @@ def get_dashboard_data():
     if os.path.exists(DASHBOARD_CACHE_FILE):
         file_age = time.time() - os.path.getmtime(DASHBOARD_CACHE_FILE)
         if file_age < _CACHE_TTL:
-            try: return joblib.load(DASHBOARD_CACHE_FILE)
-            except: pass
+            try:
+                cached = joblib.load(DASHBOARD_CACHE_FILE)
+                # Validate all required keys are present
+                required = {"income","hhsize","children","region","weekly","dept_year",
+                            "basket","seasonal","seasonal_commodity","brand","organic",
+                            "brand_income","dept","commodity","top_clv","churn_counts",
+                            "avg_clv","high_risk_count"}
+                if required.issubset(cached.keys()):
+                    return cached
+                # Cache is incomplete — fall through to regenerate
+            except:
+                pass
 
     SQLS = {
         "income": "SELECT h.INCOME_RANGE, SUM(CAST(t.SPEND AS FLOAT)) / COUNT(DISTINCT t.BASKET_NUM) as avg_spend, COUNT(DISTINCT t.HSHD_NUM) as hh_count FROM transactions t JOIN households h ON t.HSHD_NUM = h.HSHD_NUM WHERE h.INCOME_RANGE NOT IN ('null','') AND h.INCOME_RANGE IS NOT NULL GROUP BY h.INCOME_RANGE ORDER BY avg_spend DESC",
@@ -297,7 +318,11 @@ def get_dashboard_data():
                 return pd.read_sql(sql, c)
         fmap = {ex.submit(_q, sql): name for name, sql in SQLS.items()}
         for fut in concurrent.futures.as_completed(fmap):
-            results[fmap[fut]] = fut.result()
+            try:
+                results[fmap[fut]] = fut.result()
+            except Exception as e:
+                print(f"Query {fmap[fut]} failed: {e}")
+                results[fmap[fut]] = pd.DataFrame()
 
     # Lines 299–327 — replace with:
     top_clv, churn_counts, avg_clv, high_risk_count = [], {}, 0, 0
@@ -318,10 +343,24 @@ def get_dashboard_data():
         print(f"ML data not ready for dashboard: {e}")
 
     cache_data = {
-        "income": results.get("income", pd.DataFrame()),
-        # ... all your SQL results ...
-        "top_clv": top_clv, "churn_counts": churn_counts,
-        "avg_clv": avg_clv, "high_risk_count": high_risk_count,
+        "income":             results.get("income", pd.DataFrame()),
+        "hhsize":             results.get("hhsize", pd.DataFrame()),
+        "children":           results.get("children", pd.DataFrame()),
+        "region":             results.get("region", pd.DataFrame()),
+        "weekly":             results.get("weekly", pd.DataFrame()),
+        "dept_year":          results.get("dept_year", pd.DataFrame()),
+        "basket":             results.get("basket", pd.DataFrame()),
+        "seasonal":           results.get("seasonal", pd.DataFrame()),
+        "seasonal_commodity": results.get("seasonal_commodity", pd.DataFrame()),
+        "brand":              results.get("brand", pd.DataFrame()),
+        "organic":            results.get("organic", pd.DataFrame()),
+        "brand_income":       results.get("brand_income", pd.DataFrame()),
+        "dept":               results.get("dept", pd.DataFrame()),
+        "commodity":          results.get("commodity", pd.DataFrame()),
+        "top_clv":            top_clv,
+        "churn_counts":       churn_counts,
+        "avg_clv":            avg_clv,
+        "high_risk_count":    high_risk_count,
     }
 
     # Only cache if ML succeeded — don't freeze empty churn data for 30 min
